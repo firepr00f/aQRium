@@ -16,9 +16,7 @@
         "ph": 0.7,
         "sc": 1,
         "say": [
-          "Morning.",
-          "This card is warm. I approve.",
-          "Do not pick me up."
+          "커피가 맛있다!!"
         ]
       },
       {
@@ -32,8 +30,7 @@
         "ph": 3.9,
         "sc": 0.9,
         "say": [
-          "Slow is a strategy.",
-          "I have been swimming since Tuesday."
+          "사장님이 친절해요"
         ]
       },
       {
@@ -47,8 +44,7 @@
         "ph": 2.2,
         "sc": 0.95,
         "say": [
-          "Yes, the cherry is structural.",
-          "Dessert has feelings too."
+          "멋진 인테리어~"
         ]
       }
     ]
