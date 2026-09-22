@@ -2,8 +2,8 @@
   "tank01": {
     "v": 1,
     "name": "Desk reef",
-    "qr": 16,
-    "fov": 63,
+    "qr": 12,
+    "fov": 58,
     "wall": true,
     "turtles": [
       {
