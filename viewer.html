@@ -86,26 +86,14 @@
 (function(){
 "use strict";
 
-/* ═══════════════════════════════════════════════════════════════════════════
-   VOXEL REEF — marker-anchored AR viewer
-   ---------------------------------------------------------------------------
-   Pose comes from the printed QR's own four corners. jsQR already localises
-   them to sub-pixel accuracy every frame, which is both more robust and far
-   cheaper than hand-rolling a blob detector, and it means the code that
-   carries the scene is also the thing that anchors it.
+/*현재는 인쇄/창에 띄워진 큐알의 배치와 색상표의 찍히는 색감을 바탕으로 AR을 구현
+   Scene source:
+     #d=<base64url json>   
+     #s=<id>              
+     (nothing)            
+*/
 
-   Because the pose is known, the colour patches printed at fixed offsets from
-   the QR can be projected back into the camera image and sampled. That gives
-   a live white-balance and exposure reading of the room, which is what stops
-   the turtles looking pasted on.
-
-   Scene source, in order of precedence:
-     #d=<base64url json>   scene inlined in the link
-     #s=<id>               look up <id> in ./scenes.json beside this file
-     (nothing)             the built-in demo scene
-   ═══════════════════════════════════════════════════════════════════════════ */
-
-/* ───────────────────────────── 1. SCENE CONFIG ────────────────────────────── */
+/* SCENE구성 */
 
 var DEMO = {
   v:1, name:"Demo reef", qr:8.0, fov:63,
@@ -126,12 +114,7 @@ function b64urlDecode(s){
   return decodeURIComponent(escape(atob(s)));
 }
 
-/* Where scenes.json is read from, best first.
-
-   A GitHub Pages address already tells us the repo, so the raw file can be
-   read straight from the branch. That matters: a commit reaches raw within
-   seconds, while the Pages copy waits on a site rebuild. The relative path
-   stays as the fallback so this file works anywhere it is hosted. */
+/* scenes.json 파일이 읽어옴 */
 function scenesSources(){
   var out = [];
   var m = location.hostname.match(/^([^.]+)\.github\.io$/i);
@@ -197,7 +180,7 @@ function watchScene(){
   }, 15000);
 }
 
-/* ───────────────────────── 2. TURTLE MODELS (voxel) ───────────────────────── */
+/* 물고기(거북이) */
 
 var MORPHS = [
   { id:'cream',  body:'#F6E7C4', shell:'#83C43C', line:'#63A128', eye:'#1F1C26', pattern:true },
@@ -327,7 +310,7 @@ function buildTurtle(m){
   return turtle;
 }
 
-/* ─────────────────────── 3. POSE FROM FOUR MARKER CORNERS ─────────────────── */
+/* 큐알 사각 모서리 위치 계산 */
 
 // Solve the 8 unknowns of a plane->image homography from 4 correspondences.
 function homography(src, dst){          // src: [[X,Z]x4] plane, dst: [[u,v]x4] image
@@ -392,7 +375,7 @@ function poseFromH(H, fx, fy, cx, cy){
   return { r1:c1, r2:c2, n:c3, t:tv };
 }
 
-/* ───────────────────────── 4. RENDERER AND SCENE ──────────────────────────── */
+/*렌더링 */
 
 var video   = document.getElementById('cam');
 var glc     = document.getElementById('gl');
@@ -421,8 +404,7 @@ var fill = new THREE.DirectionalLight(0xD2DEFF, 0.26);
 fill.position.set(-1.1, -0.3, -0.8);
 scene.add(hemi); scene.add(key); scene.add(fill);
 
-// a soft contact shadow under the shoal: cheap, and it does more for grounding
-// than any amount of lighting work
+// 그림자 생성
 var shadowTex = (function(){
   var s = 128, cv = document.createElement('canvas');
   cv.width = cv.height = s;
@@ -436,9 +418,7 @@ var shadowTex = (function(){
 
 var CFG = null, turtles = [], picks = [];
 
-/* The card is printed on one side, so only that side exists. Every swim path
-   is held at least this many centimetres clear of the printed face; nothing is
-   ever placed behind it, where a real card or wall would hide it anyway. */
+/* 카드의 반대편으로 물고기가 넘어가는 것 방지 */
 var WALL = false;
 var CLEAR = 6;
 
@@ -449,17 +429,12 @@ function buildScene(cfg){
   while (world.children.length) world.remove(world.children[0]);
   turtles = []; picks = [];
 
-  /* Flat on a table, the marker's normal already is "up" and nothing moves.
-     Taped to a wall, that normal points horizontally at the viewer instead, so
-     turning the swim space a quarter turn about X puts the turtles back on a
-     level plane: they then cross in front of the wall rather than crawling up
-     it. Up-the-card becomes up, out-of-the-wall becomes depth. */
+  /* 벽에 붙은 큐알 모드를 켜면 수직으로 물고기 위치 변경 */
   world.rotation.x = cfg.wall ? -Math.PI / 2 : 0;
 
   (cfg.turtles || []).forEach(function(spec, i){
     var t = buildTurtle(MORPHS[spec.morph % MORPHS.length]);
-    // model is ~14 units nose to tail; a real green turtle is ~90cm, but at
-    // that size one fills a desk — scene scale is the author's call
+  
     var s = 0.30 * (spec.sc || 1);
     t.scale.setScalar(s);
     t.rotation.order = 'YZX';
@@ -481,8 +456,7 @@ function buildScene(cfg){
     }
     t.userData.shadow = sh;
 
-    // one invisible box per turtle to catch taps — far cheaper and far more
-    // forgiving than raycasting thousands of instanced voxels
+    // 탭 인지를 위한 히트박스, 개체 당 한 덩어리씩
     var hit = new THREE.Mesh(
       new THREE.BoxBufferGeometry(17*s, 12*s, 15*s),
       new THREE.MeshBasicMaterial({visible:false})
@@ -493,7 +467,7 @@ function buildScene(cfg){
   });
 }
 
-/* ────────────────────────── 5. MARKER TRACKING LOOP ───────────────────────── */
+/* 레퍼런스 (큐알) 추적 */
 
 var det = document.createElement('canvas');
 var dctx = det.getContext('2d', {willReadFrequently:true});
@@ -539,8 +513,7 @@ function detect(){
   var p = poseFromH(H, f, f, det.width / 2, det.height / 2);
   if (!p || !isFinite(p.t[2])) return;
 
-  // exponential smoothing — a raw per-frame pose jitters enough to read as
-  // vibration on a 10cm marker
+  // 스무스
   if (!smooth.t){ smooth.t = p.t; smooth.r1 = p.r1; smooth.r2 = p.r2; smooth.n = p.n; }
   else {
     var k = 0.35;
@@ -555,9 +528,7 @@ function detect(){
   if (CFG) CFG._detW = det.width;
 }
 
-/* Colour patches sit at fixed offsets from the QR, so once the homography is
-   known their pixels can be found without searching for them. Nine patches,
-   left to right: R G B C M Y, white, 50% grey, black. */
+/* 색상표 */
 var PATCH_REF = [
   [255,0,0],[0,255,0],[0,0,255],[0,255,255],[255,0,255],[255,255,0],
   [255,255,255],[128,128,128],[0,0,0]
@@ -570,7 +541,7 @@ function sampleCard(img, H){
     var w = H[2][0]*X + H[2][1]*Z + 1;
     var u = Math.round((H[0][0]*X + H[0][1]*Z + H[0][2]) / w);
     var v = Math.round((H[1][0]*X + H[1][1]*Z + H[1][2]) / w);
-    if (u < 1 || v < 1 || u >= img.width-1 || v >= img.height-1) return;   // card partly out of frame
+    if (u < 1 || v < 1 || u >= img.width-1 || v >= img.height-1) return;   // 카드의 부분 이탈
     var r=0,g=0,b=0,n=0;
     for (var dy=-1; dy<=1; dy++) for (var dx=-1; dx<=1; dx++){
       var o = ((v+dy)*img.width + (u+dx))*4;
@@ -598,7 +569,7 @@ function applyLighting(){
   fill.intensity = 0.26 * wbExposure;
 }
 
-/* ────────────────────────── 6. CAMERA FROM POSE ───────────────────────────── */
+/* 카메라 포즈 */
 
 var M = new THREE.Matrix4();
 function applyPose(){
@@ -630,15 +601,13 @@ function fitCamera(){
   camera.fov = 2 * Math.atan(vh / (2 * fFull)) * 180 / Math.PI;
   camera.aspect = vw / vh;
 
-  // the video is displayed with object-fit:cover, so tell the projection which
-  // sub-rectangle of the sensor is actually on screen
   var scale = Math.max(sw / vw, sh / vh);
   var cw = sw / scale, ch = sh / scale;
   camera.setViewOffset(vw, vh, (vw - cw) / 2, (vh - ch) / 2, cw, ch);
   camera.updateProjectionMatrix();
 }
 
-/* ─────────────────────────── 7. TAP / SPEECH BUBBLES ──────────────────────── */
+/* 태핑->말풍선 */
 
 var ray = new THREE.Raycaster();
 var ndc = new THREE.Vector2();
@@ -667,7 +636,7 @@ function speakAt(x, y){
 function say(t){
   var lines = (t.userData.spec.say || []).filter(Boolean);
   if (!lines.length) return;
-  if (t.userData.bubbleEl) return;              // already talking
+  if (t.userData.bubbleEl) return;              //이미 켜져 있음
   var line = lines[t.userData.said % lines.length];
   t.userData.said++;
 
@@ -701,15 +670,11 @@ function positionBubbles(){
   }
 }
 
-/* ───────────────────────────── 8. ANIMATION ───────────────────────────────── */
+/* 애니메이션 */
 
 var clock = new THREE.Clock();
 var t = 0, tmpA = new THREE.Vector3(), tmpB = new THREE.Vector3();
 
-/* The loop is the same ellipse either way; only which axis must stay positive
-   changes. On a wall that is depth, out of the plaster; on a table it is
-   height, above the top face. The whole loop is pushed clear rather than each
-   point clamped, or the path flattens itself against the surface. */
 function place(sp, time, out){
   var a = time * sp.sp + sp.ph;
   var bob = Math.sin(a * 1.7 + sp.ph) * 1.4;
@@ -774,7 +739,7 @@ function frame(){
   renderer.render(scene, camera);
 }
 
-/* ─────────────────────────────── 9. BOOT ──────────────────────────────────── */
+/* 부팅 */
 
 function fail(msg, fine){
   gate.classList.remove('hidden');
