@@ -1,0 +1,744 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,viewport-fit=cover">
+<title>Voxel Reef AR</title>
+<style>
+  :root{ --ink:#F2EEF9; --dim:#B3A9CC; --accent:#7FC4FF; }
+  *{box-sizing:border-box}
+  html,body{height:100%;margin:0;background:#0F0C1A;color:var(--ink);
+    font-family:ui-rounded,"Quicksand","Segoe UI",system-ui,sans-serif;overflow:hidden;
+    -webkit-user-select:none;user-select:none;-webkit-tap-highlight-color:transparent;}
+  #stage{position:fixed;inset:0;overflow:hidden;background:#0F0C1A}
+  #cam{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;}
+  #gl{position:absolute;inset:0;width:100%;height:100%;}
+  #bubbles{position:absolute;inset:0;pointer-events:none;}
+
+  .bubble{
+    position:absolute;transform:translate(-50%,-100%);
+    max-width:min(62vw,300px);padding:9px 13px;border-radius:14px;
+    background:rgba(20,16,36,.62);backdrop-filter:blur(9px);-webkit-backdrop-filter:blur(9px);
+    border:1px solid rgba(220,212,255,.28);
+    font-size:15px;line-height:1.35;color:#F6F2FF;text-shadow:0 1px 3px rgba(0,0,0,.5);
+    box-shadow:0 10px 30px -14px rgba(0,0,0,.9);
+    animation:pop .18s cubic-bezier(.2,1.4,.5,1);
+  }
+  .bubble::after{
+    content:"";position:absolute;left:50%;bottom:-7px;margin-left:-7px;
+    width:0;height:0;border:7px solid transparent;border-top-color:rgba(20,16,36,.62);
+  }
+  .bubble.out{animation:fade .35s ease forwards}
+  @keyframes pop{from{opacity:0;transform:translate(-50%,-90%) scale(.9)}to{opacity:1}}
+  @keyframes fade{to{opacity:0;transform:translate(-50%,-115%)}}
+
+  /* ---- start screen ---- */
+  #gate{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;
+    justify-content:center;gap:18px;padding:28px;text-align:center;
+    background:radial-gradient(120% 90% at 50% 20%,#241C40 0%,#0F0C1A 70%);z-index:5}
+  #gate h1{margin:0;font-size:24px;font-weight:700;letter-spacing:.01em}
+  #gate p{margin:0;max-width:34ch;color:var(--dim);font-size:14px;line-height:1.55}
+  #go{appearance:none;border:0;border-radius:999px;padding:15px 30px;font:inherit;font-weight:700;
+    font-size:16px;background:var(--accent);color:#0C1622;cursor:pointer;
+    box-shadow:0 10px 30px -12px rgba(127,196,255,.7)}
+  #go:active{transform:translateY(1px)}
+  .fine{font-family:ui-monospace,monospace;font-size:11px;letter-spacing:.05em;color:#6F6690}
+
+  /* ---- hud ---- */
+  #hud{position:absolute;left:0;right:0;top:0;padding:calc(10px + env(safe-area-inset-top,0px)) 14px 10px;
+    display:flex;justify-content:space-between;align-items:flex-start;gap:10px;pointer-events:none}
+  .chip{font-family:ui-monospace,monospace;font-size:10.5px;letter-spacing:.06em;
+    background:rgba(16,12,30,.5);border:1px solid rgba(220,212,255,.18);border-radius:8px;
+    padding:6px 9px;backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);color:var(--dim)}
+  .chip b{color:var(--ink);font-weight:600}
+  #track.lock{border-color:rgba(127,196,255,.6);color:#CFE9FF}
+  #tip{position:absolute;left:0;right:0;bottom:calc(16px + env(safe-area-inset-bottom,0px));
+    text-align:center;pointer-events:none}
+  #tip span{display:inline-block;font-family:ui-monospace,monospace;font-size:11px;letter-spacing:.05em;
+    background:rgba(16,12,30,.5);border:1px solid rgba(220,212,255,.16);border-radius:999px;
+    padding:7px 14px;color:var(--dim);backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px)}
+  .hidden{display:none!important}
+</style>
+</head>
+<body>
+<div id="stage">
+  <video id="cam" playsinline muted autoplay></video>
+  <canvas id="gl"></canvas>
+  <div id="bubbles"></div>
+
+  <div id="hud" class="hidden">
+    <div class="chip" id="scene">—</div>
+    <div class="chip" id="track">SEARCHING</div>
+  </div>
+  <div id="tip" class="hidden"><span id="tiptext">point at the card · double-tap a turtle</span></div>
+
+  <div id="gate">
+    <h1>Voxel Reef</h1>
+    <p id="gatemsg">Point your camera at the printed reef card. Turtles will settle onto it at their real size. Double-tap one to hear from it.</p>
+    <button id="go" type="button">Start camera</button>
+    <p class="fine" id="gatefine">camera stays on your device · nothing is uploaded</p>
+  </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/build/three.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js"></script>
+<script>
+(function(){
+"use strict";
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   VOXEL REEF — marker-anchored AR viewer
+   ---------------------------------------------------------------------------
+   Pose comes from the printed QR's own four corners. jsQR already localises
+   them to sub-pixel accuracy every frame, which is both more robust and far
+   cheaper than hand-rolling a blob detector, and it means the code that
+   carries the scene is also the thing that anchors it.
+
+   Because the pose is known, the colour patches printed at fixed offsets from
+   the QR can be projected back into the camera image and sampled. That gives
+   a live white-balance and exposure reading of the room, which is what stops
+   the turtles looking pasted on.
+
+   Scene source, in order of precedence:
+     #d=<base64url json>   scene inlined in the link
+     #s=<id>               look up <id> in ./scenes.json beside this file
+     (nothing)             the built-in demo scene
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+/* ───────────────────────────── 1. SCENE CONFIG ────────────────────────────── */
+
+var DEMO = {
+  v:1, name:"Demo reef", qr:8.0, fov:63,
+  turtles:[
+    { morph:0, cx: 0, cz: 0, rx: 11, rz:  8, h: 9, sp:0.13, ph:0.7, sc:1.0,
+      say:["Morning.","This card is warm. I approve.","Do not pick me up."] },
+    { morph:1, cx: 4, cz: 3, rx:  8, rz: 10, h:15, sp:0.11, ph:3.9, sc:0.9,
+      say:["Slow is a strategy.","I have been swimming since Tuesday."] },
+    { morph:2, cx:-4, cz:-2, rx:  9, rz:  7, h:21, sp:0.12, ph:2.2, sc:0.95,
+      say:["Yes, the cherry is structural.","Do not eat me.","Dessert has feelings too."] }
+  ]
+};
+
+function b64urlDecode(s){
+  s = s.replace(/-/g,'+').replace(/_/g,'/');
+  while (s.length % 4) s += '=';
+  return decodeURIComponent(escape(atob(s)));
+}
+
+function loadScene(){
+  var h = location.hash.replace(/^#/, '');
+  if (h.indexOf('d=') === 0){
+    try { return Promise.resolve(JSON.parse(b64urlDecode(h.slice(2)))); }
+    catch(e){ return Promise.resolve(DEMO); }
+  }
+  var id = h.indexOf('s=') === 0 ? h.slice(2) : h;
+  if (!id) return Promise.resolve(DEMO);
+  return fetch('scenes.json', {cache:'no-cache'})
+    .then(function(r){ return r.ok ? r.json() : null; })
+    .then(function(all){ return (all && all[id]) ? all[id] : DEMO; })
+    .catch(function(){ return DEMO; });
+}
+
+/* ───────────────────────── 2. TURTLE MODELS (voxel) ───────────────────────── */
+
+var MORPHS = [
+  { id:'cream',  body:'#F6E7C4', shell:'#83C43C', line:'#63A128', eye:'#1F1C26', pattern:true },
+  { id:'lime',   body:'#CBDC8E', shell:'#C79272', line:'#A6735A', eye:'#1F1C26', pattern:true },
+  { id:'sundae', body:'#FFF0DB', shell:'#A6DCC0', line:'#7FBE9D', eye:'#3B2A22',
+    pattern:false, jelly:true, cream:'#FFFDF7', cherry:'#B8332B', stem:'#4A3222' }
+];
+
+var BOX = new THREE.BoxBufferGeometry(1,1,1);
+(function(){
+  var n = BOX.attributes.position.count, w = new Float32Array(n*3);
+  w.fill(1); BOX.setAttribute('color', new THREE.BufferAttribute(w,3));
+})();
+
+function makeMesh(voxels, material){
+  var mesh = new THREE.InstancedMesh(BOX, material, voxels.length);
+  var m = new THREE.Matrix4();
+  for (var i = 0; i < voxels.length; i++){
+    m.makeTranslation(voxels[i].x, voxels[i].y, voxels[i].z);
+    mesh.setMatrixAt(i, m);
+    mesh.setColorAt(i, voxels[i].c);
+  }
+  mesh.instanceMatrix.needsUpdate = true;
+  if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
+  mesh.frustumCulled = false;
+  return mesh;
+}
+
+function shellPatternTex(shellHex, lineHex){
+  var cv = document.createElement('canvas');
+  cv.width = 9; cv.height = 8;
+  var ctx = cv.getContext('2d');
+  for (var i = 0; i < 9; i++) for (var j = 0; j < 8; j++){
+    var u = i - 4, v = (-4 + j) + 0.5;
+    var on = Math.abs(Math.abs(u - v) - 2.5) < 0.75 || Math.abs(Math.abs(u + v) - 2.5) < 0.75;
+    ctx.fillStyle = on ? lineHex : shellHex;
+    ctx.fillRect(i, j, 1, 1);
+  }
+  var t = new THREE.CanvasTexture(cv);
+  t.magFilter = t.minFilter = THREE.NearestFilter;
+  t.generateMipmaps = false;
+  return t;
+}
+
+function buildTurtle(m){
+  var BODY = new THREE.Color(m.body), SHELL = new THREE.Color(m.shell),
+      LINE = new THREE.Color(m.line), EYE = new THREE.Color(m.eye);
+
+  var soft = [], carapace = [];
+  function fill(list, x0,x1,y0,y1,z0,z1,c){
+    for (var x=x0;x<=x1;x++) for (var y=y0;y<=y1;y++) for (var z=z0;z<=z1;z++)
+      list.push({x:x,y:y,z:z,c:(typeof c === 'function') ? c(x,y,z) : c});
+  }
+
+  fill(soft, 1, 7, 0, 1, -3, 2, BODY);
+  fill(soft, -2, -1, 1, 1, -1, 0, BODY);
+  fill(soft, 9, 12, 1, 3, -2, 1, function(x,y,z){
+    return (x === 11 && y === 2 && (z === -2 || z === 1)) ? EYE : BODY;
+  });
+
+  if (!m.jelly){
+    fill(carapace, 0, 8, 2, 3, -4, 3, SHELL);
+    for (var sx = 0; sx <= 8; sx++) for (var sz = -4; sz <= 3; sz++){
+      var u = sx - 4, v = sz + 0.5;
+      var on = Math.abs(Math.abs(u - v) - 2.5) < 0.75 || Math.abs(Math.abs(u + v) - 2.5) < 0.75;
+      carapace.push({x:sx, y:4, z:sz, c: on ? LINE : SHELL});
+    }
+  }
+
+  var matteMat = new THREE.MeshLambertMaterial({vertexColors:true});
+  var turtle = new THREE.Group();
+  var bob = new THREE.Object3D(); turtle.add(bob);
+  var centre = new THREE.Object3D();
+  centre.position.set(-4.5, -2, 0);
+  bob.add(centre);
+  centre.add(makeMesh(soft, matteMat));
+
+  if (m.jelly){
+    var jellyBase = new THREE.MeshPhongMaterial({
+      color:m.shell, transparent:true, opacity:0.8,
+      shininess:5, specular:0x0e1311, side:THREE.FrontSide
+    });
+    var jellyTop = jellyBase.clone();
+    jellyTop.color = new THREE.Color(0xffffff);
+    jellyTop.map = shellPatternTex(m.shell, m.line);
+    var shellMesh = new THREE.Mesh(new THREE.BoxBufferGeometry(9,3,8),
+      [jellyBase, jellyBase, jellyTop, jellyBase, jellyBase, jellyBase]);
+    shellMesh.position.set(4, 3, -0.5);
+    shellMesh.renderOrder = 1;
+    centre.add(shellMesh);
+
+    var cream = [];
+    fill(cream, 2, 6, 5, 5, -2, 1, new THREE.Color(m.cream));
+    fill(cream, 3, 5, 6, 6, -2, 1, new THREE.Color(m.cream));
+    fill(cream, 4, 5, 7, 7, -1, 0, new THREE.Color(m.cream));
+    centre.add(makeMesh(cream, new THREE.MeshLambertMaterial({vertexColors:true})));
+
+    var cherry = new THREE.Mesh(BOX, new THREE.MeshLambertMaterial({color:m.cherry}));
+    cherry.position.set(4.5, 8, -0.5);
+    centre.add(cherry);
+
+    var stemMat = new THREE.MeshLambertMaterial({color:m.stem});
+    var sA = new THREE.Object3D(); sA.position.set(4.5, 8.5, -0.5); sA.rotation.z = -0.24;
+    var segA = new THREE.Mesh(new THREE.BoxBufferGeometry(0.13, 0.95, 0.13), stemMat);
+    segA.position.y = 0.47; sA.add(segA);
+    var sB = new THREE.Object3D(); sB.position.y = 0.95; sB.rotation.z = -0.55;
+    var segB = new THREE.Mesh(new THREE.BoxBufferGeometry(0.11, 0.8, 0.11), stemMat);
+    segB.position.y = 0.4; sB.add(segB); sA.add(sB);
+    centre.add(sA);
+  } else {
+    centre.add(makeMesh(carapace, new THREE.MeshLambertMaterial({vertexColors:true})));
+  }
+
+  var flippers = [];
+  [[6,-3,-1,4,0.50],[6,2,1,4,0.50],[2,-3,-1,3,0.32],[2,2,1,3,0.32]].forEach(function(sp, idx){
+    var vox = [];
+    for (var i = 0; i < sp[3]; i++) for (var x = -1; x <= 1; x++)
+      vox.push({x:x, y:0, z: sp[2]*(i+1), c:BODY});
+    var pivot = new THREE.Object3D();
+    pivot.position.set(sp[0], 0.5, sp[1]);
+    pivot.add(makeMesh(vox, matteMat));
+    centre.add(pivot);
+    flippers.push({pivot:pivot, dir:sp[2], amp:sp[4], phase: idx < 2 ? 0 : Math.PI*0.9});
+  });
+
+  turtle.userData = {bob:bob, flippers:flippers, centre:centre};
+  return turtle;
+}
+
+/* ─────────────────────── 3. POSE FROM FOUR MARKER CORNERS ─────────────────── */
+
+// Solve the 8 unknowns of a plane->image homography from 4 correspondences.
+function homography(src, dst){          // src: [[X,Z]x4] plane, dst: [[u,v]x4] image
+  var A = [], i;
+  for (i = 0; i < 4; i++){
+    var X = src[i][0], Z = src[i][1], u = dst[i][0], v = dst[i][1];
+    A.push([X, Z, 1, 0, 0, 0, -u*X, -u*Z, u]);
+    A.push([0, 0, 0, X, Z, 1, -v*X, -v*Z, v]);
+  }
+  // Gaussian elimination with partial pivoting
+  for (i = 0; i < 8; i++){
+    var piv = i;
+    for (var r = i+1; r < 8; r++) if (Math.abs(A[r][i]) > Math.abs(A[piv][i])) piv = r;
+    if (Math.abs(A[piv][i]) < 1e-12) return null;
+    var tmp = A[i]; A[i] = A[piv]; A[piv] = tmp;
+    for (var r2 = 0; r2 < 8; r2++){
+      if (r2 === i) continue;
+      var f = A[r2][i] / A[i][i];
+      if (!f) continue;
+      for (var c = i; c < 9; c++) A[r2][c] -= f * A[i][c];
+    }
+  }
+  var h = [];
+  for (i = 0; i < 8; i++) h.push(A[i][8] / A[i][i]);
+  return [[h[0],h[1],h[2]],[h[3],h[4],h[5]],[h[6],h[7],1]];
+}
+
+// Decompose H into rotation + translation given pinhole intrinsics.
+// Columns of H map the plane's X and Z axes; their cross product is the
+// marker's normal, which becomes world +Y.
+function poseFromH(H, fx, fy, cx, cy){
+  function Kinv(c0, c1, c2){ return [ (c0 - cx*c2)/fx, (c1 - cy*c2)/fy, c2 ]; }
+  var a = Kinv(H[0][0], H[1][0], H[2][0]);
+  var b = Kinv(H[0][1], H[1][1], H[2][1]);
+  var t = Kinv(H[0][2], H[1][2], H[2][2]);
+
+  var na = Math.hypot(a[0],a[1],a[2]), nb = Math.hypot(b[0],b[1],b[2]);
+  if (!na || !nb) return null;
+  var lam = 2 / (na + nb);              // average the two for stability
+  var r1 = [a[0]*lam, a[1]*lam, a[2]*lam];
+  var r2 = [b[0]*lam, b[1]*lam, b[2]*lam];
+  var tv = [t[0]*lam, t[1]*lam, t[2]*lam];
+  if (tv[2] < 0){                       // marker must be in front of the lens
+    r1 = r1.map(function(v){return -v;});
+    r2 = r2.map(function(v){return -v;});
+    tv = tv.map(function(v){return -v;});
+  }
+  // Gram-Schmidt: force the two axes orthonormal before taking the normal
+  var d = r1[0]*r2[0] + r1[1]*r2[1] + r1[2]*r2[2];
+  var c1 = [r1[0] - d*r2[0]*0.5, r1[1] - d*r2[1]*0.5, r1[2] - d*r2[2]*0.5];
+  var c2 = [r2[0] - d*r1[0]*0.5, r2[1] - d*r1[1]*0.5, r2[2] - d*r1[2]*0.5];
+  var l1 = Math.hypot(c1[0],c1[1],c1[2]), l2 = Math.hypot(c2[0],c2[1],c2[2]);
+  c1 = [c1[0]/l1, c1[1]/l1, c1[2]/l1];
+  c2 = [c2[0]/l2, c2[1]/l2, c2[2]/l2];
+  // c2 x c1, not c1 x c2: the card's +X runs right and its +Z runs DOWN the
+  // card toward the colour strip, so the outward normal is Z^ x X^. Taking the
+  // other order still reprojects perfectly but yields a reflection, and the
+  // turtles end up swimming under the table.
+  var c3 = [ c2[1]*c1[2] - c2[2]*c1[1],
+             c2[2]*c1[0] - c2[0]*c1[2],
+             c2[0]*c1[1] - c2[1]*c1[0] ];
+  return { r1:c1, r2:c2, n:c3, t:tv };
+}
+
+/* ───────────────────────── 4. RENDERER AND SCENE ──────────────────────────── */
+
+var video   = document.getElementById('cam');
+var glc     = document.getElementById('gl');
+var bubbles = document.getElementById('bubbles');
+var gate    = document.getElementById('gate');
+var hud     = document.getElementById('hud');
+var tip     = document.getElementById('tip');
+var trackEl = document.getElementById('track');
+var sceneEl = document.getElementById('scene');
+
+var renderer = new THREE.WebGLRenderer({canvas:glc, alpha:true, antialias:true});
+renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+
+var scene  = new THREE.Scene();
+var camera = new THREE.PerspectiveCamera(60, 1, 1, 4000);
+camera.matrixAutoUpdate = false;
+
+// world units are centimetres, with the marker lying on the XZ plane at y=0
+var world = new THREE.Group();
+scene.add(world);
+
+var hemi = new THREE.HemisphereLight(0xE8EFFF, 0xFFE6D6, 0.62);
+var key  = new THREE.DirectionalLight(0xFFFFFF, 0.58);
+key.position.set(1.0, 1.5, 0.9);
+var fill = new THREE.DirectionalLight(0xD2DEFF, 0.26);
+fill.position.set(-1.1, -0.3, -0.8);
+scene.add(hemi); scene.add(key); scene.add(fill);
+
+// a soft contact shadow under the shoal: cheap, and it does more for grounding
+// than any amount of lighting work
+var shadowTex = (function(){
+  var s = 128, cv = document.createElement('canvas');
+  cv.width = cv.height = s;
+  var g = cv.getContext('2d').createRadialGradient(s/2, s/2, 0, s/2, s/2, s/2);
+  g.addColorStop(0, 'rgba(0,0,0,0.42)');
+  g.addColorStop(0.55, 'rgba(0,0,0,0.16)');
+  g.addColorStop(1, 'rgba(0,0,0,0)');
+  var c = cv.getContext('2d'); c.fillStyle = g; c.fillRect(0,0,s,s);
+  return new THREE.CanvasTexture(cv);
+})();
+
+var CFG = null, turtles = [], picks = [];
+
+function buildScene(cfg){
+  CFG = cfg;
+  sceneEl.innerHTML = '<b>' + (cfg.name || 'reef') + '</b>';
+  while (world.children.length) world.remove(world.children[0]);
+  turtles = []; picks = [];
+
+  (cfg.turtles || []).forEach(function(spec, i){
+    var t = buildTurtle(MORPHS[spec.morph % MORPHS.length]);
+    // model is ~14 units nose to tail; a real green turtle is ~90cm, but at
+    // that size one fills a desk — scene scale is the author's call
+    var s = 0.30 * (spec.sc || 1);
+    t.scale.setScalar(s);
+    t.rotation.order = 'YZX';
+    t.userData.spec = spec;
+    t.userData.said = 0;
+    world.add(t);
+    turtles.push(t);
+
+    var sh = new THREE.Mesh(
+      new THREE.PlaneBufferGeometry(26*s, 26*s),
+      new THREE.MeshBasicMaterial({map:shadowTex, transparent:true, depthWrite:false})
+    );
+    sh.rotation.x = -Math.PI/2;
+    sh.position.y = 0.12;
+    sh.renderOrder = -1;
+    world.add(sh);
+    t.userData.shadow = sh;
+
+    // one invisible box per turtle to catch taps — far cheaper and far more
+    // forgiving than raycasting thousands of instanced voxels
+    var hit = new THREE.Mesh(
+      new THREE.BoxBufferGeometry(17*s, 12*s, 15*s),
+      new THREE.MeshBasicMaterial({visible:false})
+    );
+    hit.userData.turtle = t;
+    world.add(hit);
+    t.userData.hit = hit;
+  });
+}
+
+/* ────────────────────────── 5. MARKER TRACKING LOOP ───────────────────────── */
+
+var det = document.createElement('canvas');
+var dctx = det.getContext('2d', {willReadFrequently:true});
+var DET_W = 360;
+
+var pose = null, poseAge = 1e9, lastDetect = 0;
+var smooth = { t:null, r1:null, r2:null, n:null };
+var wbGain = new THREE.Color(1,1,1), wbExposure = 1;
+
+function lerp3(a, b, k){
+  return [a[0]+(b[0]-a[0])*k, a[1]+(b[1]-a[1])*k, a[2]+(b[2]-a[2])*k];
+}
+
+function detect(){
+  var vw = video.videoWidth, vh = video.videoHeight;
+  if (!vw || !vh) return;
+  var scale = DET_W / vw;
+  det.width = DET_W; det.height = Math.round(vh * scale);
+  dctx.drawImage(video, 0, 0, det.width, det.height);
+  var img = dctx.getImageData(0, 0, det.width, det.height);
+  var code = null;
+  try { code = jsQR(img.data, img.width, img.height, {inversionAttempts:'dontInvert'}); }
+  catch(e){ return; }
+  if (!code || !code.location) return;
+
+  var L = code.location;
+  var q = (CFG && CFG.qr ? CFG.qr : 8.0);      // printed QR side, centimetres
+  var half = q / 2;
+  // jsQR corner order, and the same corners in marker-plane coordinates
+  var srcPts = [[-half,-half],[half,-half],[half,half],[-half,half]];
+  var dstPts = [
+    [L.topLeftCorner.x,     L.topLeftCorner.y],
+    [L.topRightCorner.x,    L.topRightCorner.y],
+    [L.bottomRightCorner.x, L.bottomRightCorner.y],
+    [L.bottomLeftCorner.x,  L.bottomLeftCorner.y]
+  ];
+
+  var H = homography(srcPts, dstPts);
+  if (!H) return;
+
+  var fovDeg = (CFG && CFG.fov) ? CFG.fov : 63;
+  var f = (det.width / 2) / Math.tan(fovDeg * Math.PI / 360);
+  var p = poseFromH(H, f, f, det.width / 2, det.height / 2);
+  if (!p || !isFinite(p.t[2])) return;
+
+  // exponential smoothing — a raw per-frame pose jitters enough to read as
+  // vibration on a 10cm marker
+  if (!smooth.t){ smooth.t = p.t; smooth.r1 = p.r1; smooth.r2 = p.r2; smooth.n = p.n; }
+  else {
+    var k = 0.35;
+    smooth.t  = lerp3(smooth.t,  p.t,  k);
+    smooth.r1 = lerp3(smooth.r1, p.r1, k);
+    smooth.r2 = lerp3(smooth.r2, p.r2, k);
+    smooth.n  = lerp3(smooth.n,  p.n,  k);
+  }
+  pose = smooth; poseAge = 0;
+
+  sampleCard(img, H);
+  if (CFG) CFG._detW = det.width;
+}
+
+/* Colour patches sit at fixed offsets from the QR, so once the homography is
+   known their pixels can be found without searching for them. Nine patches,
+   left to right: R G B C M Y, white, 50% grey, black. */
+var PATCH_REF = [
+  [255,0,0],[0,255,0],[0,0,255],[0,255,255],[255,0,255],[255,255,0],
+  [255,255,255],[128,128,128],[0,0,0]
+];
+function sampleCard(img, H){
+  var q = (CFG && CFG.qr ? CFG.qr : 8.0);
+  var read = [], i;
+  for (i = 0; i < 9; i++){
+    var X = (-0.64 + i * 0.16) * q, Z = 0.78 * q;
+    var w = H[2][0]*X + H[2][1]*Z + 1;
+    var u = Math.round((H[0][0]*X + H[0][1]*Z + H[0][2]) / w);
+    var v = Math.round((H[1][0]*X + H[1][1]*Z + H[1][2]) / w);
+    if (u < 1 || v < 1 || u >= img.width-1 || v >= img.height-1) return;   // card partly out of frame
+    var r=0,g=0,b=0,n=0;
+    for (var dy=-1; dy<=1; dy++) for (var dx=-1; dx<=1; dx++){
+      var o = ((v+dy)*img.width + (u+dx))*4;
+      r += img.data[o]; g += img.data[o+1]; b += img.data[o+2]; n++;
+    }
+    read.push([r/n, g/n, b/n]);
+  }
+  var white = read[6], black = read[8];
+  var rr = Math.max(1, white[0]-black[0]), gg = Math.max(1, white[1]-black[1]), bb = Math.max(1, white[2]-black[2]);
+  var avg = (rr+gg+bb)/3;
+  // clamped so a bad read can never wash the models out
+  var gr = Math.min(1.35, Math.max(0.74, avg/rr));
+  var gg2= Math.min(1.35, Math.max(0.74, avg/gg));
+  var gb = Math.min(1.35, Math.max(0.74, avg/bb));
+  wbGain.setRGB(gr, gg2, gb);
+  var grey = (read[7][0]+read[7][1]+read[7][2])/3;
+  wbExposure = Math.min(1.25, Math.max(0.6, grey / 118));
+}
+
+function applyLighting(){
+  hemi.color.setRGB(0.91*wbGain.r, 0.937*wbGain.g, 1.0*wbGain.b);
+  hemi.intensity = 0.62 * wbExposure;
+  key.color.setRGB(wbGain.r, wbGain.g, wbGain.b);
+  key.intensity = 0.58 * wbExposure;
+  fill.intensity = 0.26 * wbExposure;
+}
+
+/* ────────────────────────── 6. CAMERA FROM POSE ───────────────────────────── */
+
+var M = new THREE.Matrix4();
+function applyPose(){
+  if (!pose) return;
+  var r1 = pose.r1, up = pose.n, r2 = pose.r2, t = pose.t;
+  // world->camera in OpenCV axes; world columns are (X, Y=normal, Z)
+  M.set(
+    r1[0], up[0], r2[0], t[0],
+    r1[1], up[1], r2[1], t[1],
+    r1[2], up[2], r2[2], t[2],
+    0, 0, 0, 1
+  );
+  // OpenCV (y down, z forward) -> three.js (y up, z back)
+  var flip = new THREE.Matrix4().makeScale(1, -1, -1);
+  M.premultiply(flip);
+  camera.matrixWorld.copy(M).invert();
+  camera.matrixWorldInverse.copy(M);
+  camera.matrix.copy(camera.matrixWorld);
+  camera.matrixWorldNeedsUpdate = false;
+}
+
+function fitCamera(){
+  var vw = video.videoWidth || 1280, vh = video.videoHeight || 720;
+  var sw = window.innerWidth, sh = window.innerHeight;
+  renderer.setSize(sw, sh, false);
+
+  var fovDeg = (CFG && CFG.fov) ? CFG.fov : 63;
+  var fFull = (vw / 2) / Math.tan(fovDeg * Math.PI / 360);
+  camera.fov = 2 * Math.atan(vh / (2 * fFull)) * 180 / Math.PI;
+  camera.aspect = vw / vh;
+
+  // the video is displayed with object-fit:cover, so tell the projection which
+  // sub-rectangle of the sensor is actually on screen
+  var scale = Math.max(sw / vw, sh / vh);
+  var cw = sw / scale, ch = sh / scale;
+  camera.setViewOffset(vw, vh, (vw - cw) / 2, (vh - ch) / 2, cw, ch);
+  camera.updateProjectionMatrix();
+}
+
+/* ─────────────────────────── 7. TAP / SPEECH BUBBLES ──────────────────────── */
+
+var ray = new THREE.Raycaster();
+var ndc = new THREE.Vector2();
+var lastTap = 0, lastTapXY = null;
+
+function onTap(x, y){
+  var now = performance.now();
+  var near = lastTapXY && Math.hypot(x - lastTapXY[0], y - lastTapXY[1]) < 48;
+  if (now - lastTap < 340 && near){
+    lastTap = 0;
+    speakAt(x, y);
+  } else {
+    lastTap = now; lastTapXY = [x, y];
+  }
+}
+
+function speakAt(x, y){
+  ndc.x = (x / window.innerWidth) * 2 - 1;
+  ndc.y = -(y / window.innerHeight) * 2 + 1;
+  ray.setFromCamera(ndc, camera);
+  var hits = ray.intersectObjects(turtles.map(function(t){ return t.userData.hit; }), false);
+  if (!hits.length) return;
+  say(hits[0].object.userData.turtle);
+}
+
+function say(t){
+  var lines = (t.userData.spec.say || []).filter(Boolean);
+  if (!lines.length) return;
+  if (t.userData.bubbleEl) return;              // already talking
+  var line = lines[t.userData.said % lines.length];
+  t.userData.said++;
+
+  var el = document.createElement('div');
+  el.className = 'bubble';
+  el.textContent = line;
+  bubbles.appendChild(el);
+  t.userData.bubbleEl = el;
+  t.userData.bubbleUntil = performance.now() + 3000;
+}
+
+var tmpV = new THREE.Vector3();
+function positionBubbles(){
+  for (var i = 0; i < turtles.length; i++){
+    var t = turtles[i];
+    if (!t.userData.bubbleEl) continue;
+    if (performance.now() > t.userData.bubbleUntil){
+      var el = t.userData.bubbleEl;
+      el.classList.add('out');
+      setTimeout(function(e){ return function(){ e.remove(); }; }(el), 340);
+      t.userData.bubbleEl = null;
+      continue;
+    }
+    tmpV.set(0, 3.2, 0).applyMatrix4(t.matrixWorld);
+    tmpV.project(camera);
+    var sx = (tmpV.x * 0.5 + 0.5) * window.innerWidth;
+    var sy = (-tmpV.y * 0.5 + 0.5) * window.innerHeight - 14;
+    t.userData.bubbleEl.style.left = Math.round(sx) + 'px';
+    t.userData.bubbleEl.style.top  = Math.round(sy) + 'px';
+    t.userData.bubbleEl.style.opacity = (tmpV.z > 1 ? 0 : 1);
+  }
+}
+
+/* ───────────────────────────── 8. ANIMATION ───────────────────────────────── */
+
+var clock = new THREE.Clock();
+var t = 0, tmpA = new THREE.Vector3(), tmpB = new THREE.Vector3();
+
+function place(sp, time, out){
+  var a = time * sp.sp + sp.ph;
+  return out.set(
+    sp.cx + Math.sin(a) * sp.rx,
+    (sp.h || 8) + Math.sin(a * 1.7 + sp.ph) * 1.4,
+    sp.cz + Math.cos(a * 0.82) * sp.rz
+  );
+}
+
+function frame(){
+  requestAnimationFrame(frame);
+  var dt = Math.min(clock.getDelta(), 0.05);
+  t += dt;
+  poseAge += dt;
+
+  var now = performance.now();
+  if (now - lastDetect > 70){ lastDetect = now; detect(); }
+
+  var locked = poseAge < 1.2;
+  trackEl.textContent = locked ? 'LOCKED' : 'SEARCHING';
+  trackEl.className = 'chip' + (locked ? ' lock' : '');
+  world.visible = locked;
+
+  if (pose) applyPose();
+  applyLighting();
+
+  for (var i = 0; i < turtles.length; i++){
+    var tt = turtles[i], sp = tt.userData.spec;
+    place(sp, t, tmpA);
+    place(sp, t + 0.05, tmpB);
+    tt.position.copy(tmpA);
+    var d = tmpB.sub(tmpA);
+    var flat = Math.hypot(d.x, d.z) || 1e-4;
+    tt.rotation.y = Math.atan2(-d.z, d.x);
+    tt.rotation.z = Math.atan2(d.y, flat) * 0.6;
+
+    var tb = t * 1.65 + sp.ph * 2;
+    tt.userData.bob.position.y = Math.sin(tb * 0.8) * 0.30;
+    tt.userData.bob.rotation.z = Math.sin(tb * 0.6 + 1.2) * 0.05;
+    var fl = tt.userData.flippers;
+    for (var q2 = 0; q2 < fl.length; q2++){
+      var g = fl[q2];
+      g.pivot.rotation.x = g.dir * Math.sin(tb + g.phase) * g.amp;
+      g.pivot.rotation.y = Math.sin(tb * 0.5 + g.phase) * 0.12;
+    }
+
+    tt.updateMatrixWorld();
+    var sh = tt.userData.shadow;
+    sh.position.x = tt.position.x; sh.position.z = tt.position.z;
+    sh.material.opacity = Math.max(0.15, 1 - tt.position.y / 40);
+    var hit = tt.userData.hit;
+    hit.position.copy(tt.position);
+    hit.rotation.y = tt.rotation.y;
+  }
+
+  positionBubbles();
+  renderer.render(scene, camera);
+}
+
+/* ─────────────────────────────── 9. BOOT ──────────────────────────────────── */
+
+function fail(msg, fine){
+  gate.classList.remove('hidden');
+  document.getElementById('gatemsg').textContent = msg;
+  document.getElementById('go').classList.add('hidden');
+  if (fine) document.getElementById('gatefine').textContent = fine;
+}
+
+document.getElementById('go').addEventListener('click', function(){
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia){
+    fail('This browser will not hand over the camera. Open the link in Safari or Chrome.',
+         'a page served over https is required');
+    return;
+  }
+  navigator.mediaDevices.getUserMedia({
+    video: { facingMode: {ideal:'environment'}, width:{ideal:1280}, height:{ideal:720} },
+    audio: false
+  }).then(function(stream){
+    video.srcObject = stream;
+    return video.play();
+  }).then(function(){
+    gate.classList.add('hidden');
+    hud.classList.remove('hidden');
+    tip.classList.remove('hidden');
+    fitCamera();
+    setTimeout(function(){ tip.classList.add('hidden'); }, 6000);
+  }).catch(function(err){
+    fail('Camera was refused (' + (err && err.name ? err.name : 'error') + '). ' +
+         'Check the site permission and that the page is on https.',
+         'nothing works without the camera on this page');
+  });
+});
+
+['pointerdown'].forEach(function(ev){
+  document.getElementById('stage').addEventListener(ev, function(e){
+    onTap(e.clientX, e.clientY);
+  });
+});
+window.addEventListener('resize', fitCamera);
+video.addEventListener('loadedmetadata', fitCamera);
+
+loadScene().then(function(cfg){
+  buildScene(cfg);
+  fitCamera();
+  frame();
+});
+
+})();
+</script>
+</body>
+</html>
