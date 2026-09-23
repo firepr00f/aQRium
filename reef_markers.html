@@ -1,0 +1,775 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,viewport-fit=cover">
+<title>Reef Marker Test</title>
+<style>
+  :root{ --ink:#F2EEF9; --dim:#B3A9CC; --accent:#7FC4FF; --bad:#FF8FA3; --good:#7FE8B0; }
+  *{box-sizing:border-box}
+  html,body{height:100%;margin:0;background:#0B0916;color:var(--ink);
+    font-family:ui-rounded,"Quicksand","Segoe UI",system-ui,sans-serif;overflow:hidden;
+    -webkit-user-select:none;user-select:none;-webkit-tap-highlight-color:transparent;}
+  #stage{position:fixed;inset:0;overflow:hidden;background:#0B0916}
+  #cam{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;}
+  #gl{position:absolute;inset:0;width:100%;height:100%;}
+
+  #hud{position:absolute;left:0;right:0;top:0;padding:calc(10px + env(safe-area-inset-top,0px)) 12px 10px;
+    display:flex;flex-wrap:wrap;gap:6px;pointer-events:none}
+  .chip{font-family:ui-monospace,monospace;font-size:10.5px;letter-spacing:.05em;
+    background:rgba(16,12,30,.55);border:1px solid rgba(220,212,255,.18);border-radius:8px;
+    padding:6px 9px;backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);color:var(--dim)}
+  .chip b{color:var(--ink);font-weight:600}
+  .chip.on{border-color:rgba(127,232,176,.6);color:#CFFFE3}
+  .chip.off{border-color:rgba(255,143,163,.5);color:#FFD9DF}
+
+  #bottom{position:absolute;left:0;right:0;bottom:calc(14px + env(safe-area-inset-bottom,0px));
+    display:flex;justify-content:center;gap:10px;pointer-events:none}
+  #bottom button{pointer-events:auto;appearance:none;border:1px solid rgba(220,212,255,.24);
+    background:rgba(16,12,30,.55);color:var(--dim);border-radius:999px;padding:8px 14px;
+    font:inherit;font-size:11.5px;letter-spacing:.04em;backdrop-filter:blur(8px);cursor:pointer}
+  #bottom button:active{transform:translateY(1px)}
+
+  #gate{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;
+    justify-content:center;gap:16px;padding:28px;text-align:center;
+    background:radial-gradient(120% 90% at 50% 20%,#241C40 0%,#0B0916 70%);z-index:5}
+  #gate h1{margin:0;font-size:22px;font-weight:700}
+  #gate p{margin:0;max-width:34ch;color:var(--dim);font-size:13.5px;line-height:1.55}
+  #go{appearance:none;border:0;border-radius:999px;padding:15px 30px;font:inherit;font-weight:700;
+    font-size:16px;background:var(--accent);color:#0C1622;cursor:pointer;
+    box-shadow:0 10px 30px -12px rgba(127,196,255,.7)}
+  #go:active{transform:translateY(1px)}
+  .fine{font-family:ui-monospace,monospace;font-size:10.5px;letter-spacing:.04em;color:#6F6690}
+  .hidden{display:none!important}
+</style>
+
+<div id="stage">
+  <video id="cam" playsinline muted autoplay></video>
+  <canvas id="gl"></canvas>
+
+  <div id="hud" class="hidden">
+    <div class="chip" id="cPink">PINK —</div>
+    <div class="chip" id="cGreen">GREEN —</div>
+    <div class="chip" id="cAnchor">ANCHOR SEARCHING</div>
+    <div class="chip" id="cGyro">GYRO —</div>
+    <div class="chip" id="cDist">— cm</div>
+  </div>
+
+  <div id="bottom" class="hidden">
+    <button id="reset" type="button">앵커 다시 잡기</button>
+  </div>
+
+  <div id="gate">
+    <h1>Reef · Marker Test</h1>
+    <p id="gatemsg">분홍/초록 형광 마커 두 개(50cm 간격)를 인식해서 그 가운데를 중심으로 물고기가 돕니다. 자이로로 화면을 자유롭게 둘러볼 수 있어요.</p>
+    <button id="go" type="button">카메라 시작</button>
+    <p class="fine" id="gatefine">카메라·모션 권한이 필요해요 · 조명 보정 없음(테스트용)</p>
+  </div>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script>
+(function(){
+"use strict";
+
+/* ============================================================================
+   REEF · MARKER TEST
+   ----------------------------------------------------------------------------
+   Physical markers: fluorescent pink + green cuboids, 50cm apart, no printed
+   QR/pattern involved in tracking. Position comes from a much weaker signal
+   than the old QR-homography build (two colour blobs instead of four sharp
+   corners), so the design leans harder on the gyro:
+
+     - Camera ORIENTATION is driven every frame by DeviceOrientationEvent.
+       This is what "holds" the view when the markers are off-screen.
+     - Camera POSITION stays fixed at the world origin — this rig only
+       models "stand in one spot and look around," not walking around.
+     - The two blobs only ever contribute ONE thing: where the midpoint
+       between the markers sits in world space (the "anchor"). Distance is
+       estimated from how far apart the blobs are on screen vs. the known
+       50cm real separation; bearing is read off the midpoint pixel.
+     - Every time both blobs are seen with decent confidence, that estimate
+       nudges the camera's yaw (correcting gyro drift) and gently refines
+       the anchor position. When markers drop out of frame, the anchor and
+       the last yaw correction simply stay put.
+
+   No colour grading, white balance or shadow simulation here on purpose —
+   out of scope for this pass. Fish geometry/animation ported from the
+   Voxel Reef artifact (clownfish + blue tang only), tripled in count.
+   ============================================================================ */
+
+/* ─────────────────────────── 0. TUNABLE CONSTANTS ─────────────────────────── */
+
+var MARKER_SEP_CM = 50;     // real distance between the pink and green cuboid
+var FOV_DEG        = 62;    // assumed horizontal FOV of the phone's back camera
+                             // (uncalibrated — if fish feel too near/far or the
+                             // distance chip reads obviously wrong, tune this)
+
+// two-stage detector: first gate on "is this pixel fluorescent at all"
+// (high saturation AND high brightness — the physical signature of
+// fluorescent pigment under normal light), then classify gated pixels by hue.
+var S_GATE = 0.45, V_GATE = 0.55;
+var PINK_HUE_MIN = 300, PINK_HUE_MAX = 345;   // magenta/hot-pink band
+var GREEN_HUE_MIN = 75,  GREEN_HUE_MAX = 150; // fluorescent/chartreuse green band
+var MIN_BLOB_PIXELS = 5;    // below this, treat as noise
+var GOOD_STREAK_NEEDED = 3; // consecutive good detections before trusting a fix
+
+var DET_W = 220;            // detection canvas width, px — kept small for speed
+var DET_MS = 90;            // detection cadence, ms (~11Hz) — decoupled from render
+
+/* ───────────────────────────── 1. FISH PALETTE ────────────────────────────── */
+/* Ported verbatim from Voxel Reef (fish only — turtles excluded per request). */
+
+var PAL = {
+  o:'#F0925A', w:'#FBF2E6', k:'#4A3A52', f:'#F6BC8C', e:'#2A2233',
+  b:'#5274CF', l:'#8AA7EA', n:'#2E3560', y:'#F0CB6B'
+};
+
+var CLOWN_SIL = [
+  "...XXXXX....",
+  ".XXXXXXXX...",
+  "XXXXXXXXXXX.",
+  "XXXXXXXXXXXX",
+  "XXXXXXXXXXXX",
+  "XXXXXXXXXXX.",
+  ".XXXXXXXX...",
+  "...XXXXX...."
+];
+var CLOWN_BANDS = "oowkooowkowk";
+
+function paintByColumn(sil, bands){
+  return sil.map(function(row){
+    var out = "";
+    for (var c = 0; c < row.length; c++) out += (row[c] === 'X') ? bands[c] : '.';
+    return out;
+  });
+}
+
+var CLOWNFISH = {
+  id:'clown',
+  cells: paintByColumn(CLOWN_SIL, CLOWN_BANDS),
+  thick:[1,1,1,1,1,1,1,1,0,0,0,0],
+  eye:{col:1,row:3},
+  extras:[
+    { rowStart:-2, color:'f', rows:["....XXXX...."] },
+    { rowStart:-1, color:'f', rows:["..XXXXXXXX.."] },
+    { rowStart: 8, color:'f', rows:[".....XXXX..."] }
+  ],
+  tail:{ color:'f', edge:'w', rowStart:0, rows:["..XX",".XXX","XXXX","XXXX",".XXX","..XX"] },
+  pect:{ atCol:2, atRow:4, color:'f', rows:["XX.","XXX",".XX"] },
+  scale:0.62, tailAmp:0.85,
+  variants:[ {h:0,s:1,v:1}, {h:-8,s:0.92,v:1.04}, {h:7,s:1.05,v:0.95} ]
+};
+
+var BLUETANG = {
+  id:'tang',
+  cells:[
+    "....nnnnn....",
+    "..bbnnnnnnn..",
+    ".bbbbbbnnnnn.",
+    "bbbbbbbbnnnny",
+    "bbbbbbbbnnnny",
+    "lbbbbbbbnnnny",
+    ".lbbbbbbnnnn.",
+    "..llbbbbbnn..",
+    "....llbbn...."
+  ],
+  thick:[0,1,1,1,1,1,1,1,1,1,0,0,0],
+  eye:{col:2,row:4},
+  extras:[
+    { rowStart:-1, color:'n', rows:["...nnnnnnn..."] },
+    { rowStart: 9, color:'n', rows:["....nnnnn...."] }
+  ],
+  tail:{ color:'y', edge:'n', rowStart:0, rows:["..XX",".XXX","XXXX","XXX.","XXXX",".XXX","..XX"] },
+  pect:{ atCol:3, atRow:5, color:'l', rows:["XX.","XXX",".XX"] },
+  scale:0.60, tailAmp:0.7,
+  variants:[ {h:0,s:1,v:1}, {h:10,s:0.9,v:1.05}, {h:-9,s:1.08,v:0.94} ]
+};
+
+var _c = new THREE.Color();
+function shade(hex, hueDeg, satMul, valMul, rowT){
+  _c.set(hex);
+  var hsl = {h:0,s:0,l:0};
+  _c.getHSL(hsl);
+  var lift = (0.5 - rowT) * 0.055;
+  _c.setHSL(
+    (hsl.h + hueDeg/360 + 1) % 1,
+    Math.max(0, Math.min(1, hsl.s * satMul)),
+    Math.max(0.04, Math.min(0.97, (hsl.l + lift) * valMul))
+  );
+  return _c.clone();
+}
+
+var BOX = new THREE.BoxBufferGeometry(1,1,1);
+(function(){
+  var n = BOX.attributes.position.count, w = new Float32Array(n*3);
+  w.fill(1); BOX.setAttribute('color', new THREE.BufferAttribute(w,3));
+})();
+
+function hash3(a,b,c){
+  var n = Math.sin(a*127.1 + b*311.7 + c*74.7) * 43758.5453;
+  return n - Math.floor(n);
+}
+function dilateSet(set){
+  var out = new Set();
+  set.forEach(function(k){
+    var p = k.split(','), a=+p[0], b=+p[1], c=+p[2];
+    for (var i=-1;i<=1;i++) for (var j=-1;j<=1;j++) for (var l=-1;l<=1;l++)
+      out.add((a+i)+','+(b+j)+','+(c+l));
+  });
+  return out;
+}
+function makeArcTexture(){
+  var W=64,H=64, cv=document.createElement('canvas'); cv.width=W; cv.height=H;
+  var ctx=cv.getContext('2d'), img=ctx.createImageData(W,H), d=img.data;
+  var SHADES=[{c:[28,14,148],a:70},{c:[50,28,214],a:132},{c:[78,56,255],a:192},{c:[118,102,255],a:236}];
+  var seed=20260923;
+  function rnd(){ seed|=0; seed=seed+0x6D2B79F5|0; var t=Math.imul(seed^seed>>>15,1|seed);
+    t=t+Math.imul(t^t>>>7,61|t)^t; return ((t^t>>>14)>>>0)/4294967296; }
+  function stamp(x,y,s){ x=((x%W)+W)%W; y=((y%H)+H)%H; var o=((y|0)*W+(x|0))*4;
+    if (s.a<=d[o+3]) return; d[o]=s.c[0]; d[o+1]=s.c[1]; d[o+2]=s.c[2]; d[o+3]=s.a; }
+  for (var f=0; f<26; f++){
+    var x=rnd()*W, y=rnd()*H, ang=rnd()*Math.PI*2, len=20+rnd()*34;
+    for (var s=0; s<len; s++){
+      ang += (rnd()-0.5)*1.5; x += Math.cos(ang); y += Math.sin(ang);
+      stamp(x,y,SHADES[3]);
+      if (rnd()<0.6)  stamp(x+(rnd()<0.5?-1:1), y, SHADES[2]);
+      if (rnd()<0.34) stamp(x, y+(rnd()<0.5?-1:1), SHADES[1]);
+      if (rnd()<0.18) stamp(x+(rnd()<0.5?-1:1), y+(rnd()<0.5?-1:1), SHADES[0]);
+      if (rnd()<0.06){
+        var bx=x,by=y,ba=ang+(rnd()-0.5)*2.4;
+        for (var k=0;k<6;k++){ bx+=Math.cos(ba); by+=Math.sin(ba); stamp(bx,by,SHADES[2]); }
+      }
+    }
+  }
+  for (var p=0;p<90;p++) stamp(rnd()*W, rnd()*H, SHADES[rnd()<0.3?3:1]);
+  ctx.putImageData(img,0,0);
+  var tex = new THREE.CanvasTexture(cv);
+  tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+  tex.magFilter = THREE.NearestFilter; tex.minFilter = THREE.NearestFilter;
+  tex.generateMipmaps = false;
+  return tex;
+}
+var ARC_TEX = makeArcTexture();
+
+function makeMesh(voxels, material){
+  var mesh = new THREE.InstancedMesh(BOX, material, voxels.length);
+  var m = new THREE.Matrix4();
+  for (var i=0;i<voxels.length;i++){
+    var v = voxels[i];
+    m.makeTranslation(v.x, v.y, v.z);
+    mesh.setMatrixAt(i, m);
+    mesh.setColorAt(i, v.c);
+  }
+  mesh.instanceMatrix.needsUpdate = true;
+  if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
+  mesh.frustumCulled = false;
+  return mesh;
+}
+
+function buildFish(sheet, variant, charged){
+  var cells = sheet.cells, cols = cells[0].length, rows = cells.length, midR = (rows-1)/2;
+  var V = variant || {h:0,s:1,v:1};
+  var mat = new THREE.MeshLambertMaterial({vertexColors:true});
+  var fish = new THREE.Group();
+  fish.rotation.order = 'YZX';
+
+  var buckets = []; for (var c=0;c<cols;c++) buckets.push([]);
+  var solid = new Set();
+  function solidify(col,row,z){ solid.add(col+','+row+','+z); }
+  function tintFor(ch, rowIdx){
+    var rowT = 1 - (rowIdx / Math.max(1, rows-1));
+    return shade(PAL[ch], V.h, V.s, V.v, rowT);
+  }
+
+  for (var r=0;r<rows;r++){
+    var line = cells[r];
+    for (var c2=0;c2<cols;c2++){
+      var ch = line[c2];
+      if (!ch || ch === '.') continue;
+      var t = sheet.thick[c2];
+      for (var z=-t; z<=t; z++){
+        var isEye = sheet.eye && sheet.eye.col===c2 && sheet.eye.row===r && Math.abs(z)===t && t>0;
+        buckets[c2].push({ x:0, y:(midR-r), z:z, c: isEye ? shade(PAL.e,0,1,1,0.5) : tintFor(ch,r) });
+        solidify(c2,r,z);
+      }
+    }
+  }
+  (sheet.extras||[]).forEach(function(fin){
+    for (var fr=0; fr<fin.rows.length; fr++){
+      var line = fin.rows[fr], rowIdx = fin.rowStart+fr;
+      for (var fc=0; fc<line.length && fc<cols; fc++){
+        if (line[fc] === '.') continue;
+        var ch = (line[fc]==='X') ? fin.color : line[fc];
+        buckets[fc].push({ x:0, y:(midR-rowIdx), z:0, c: tintFor(ch, Math.max(0,Math.min(rows-1,rowIdx))) });
+        solidify(fc,rowIdx,0);
+      }
+    }
+  });
+
+  var segments = [], segByCol = {};
+  for (var c3=0;c3<cols;c3++){
+    if (!buckets[c3].length) continue;
+    var seg = new THREE.Object3D();
+    seg.position.x = (cols-1)/2 - c3;
+    seg.add(makeMesh(buckets[c3], mat));
+    seg.userData.t = c3/(cols-1);
+    fish.add(seg); segments.push(seg); segByCol[c3] = seg;
+  }
+
+  var tailVox = [], tRows = sheet.tail.rows, tMid = (tRows.length-1)/2;
+  for (var tr=0; tr<tRows.length; tr++){
+    var tline = tRows[tr];
+    for (var tc=0; tc<tline.length; tc++){
+      if (tline[tc] === '.') continue;
+      var tch = (tc===0 && sheet.tail.edge) ? sheet.tail.edge : sheet.tail.color;
+      tailVox.push({ x:-(tc+0.5), y:(tMid-tr), z:0, c: tintFor(tch, 1-(tr/Math.max(1,tRows.length-1))) });
+    }
+  }
+  var tail = new THREE.Object3D();
+  tail.position.x = -((cols-1)/2) - 0.5;
+  tail.add(makeMesh(tailVox, mat));
+  fish.add(tail);
+
+  var pects = [];
+  if (sheet.pect){
+    var pRows = sheet.pect.rows;
+    [-1,1].forEach(function(side){
+      var vox = [];
+      for (var pr=0; pr<pRows.length; pr++)
+        for (var pc=0; pc<pRows[pr].length; pc++){
+          if (pRows[pr][pc] === '.') continue;
+          vox.push({ x:-pc, y:-pr, z:0, c: tintFor(sheet.pect.color, 0.4) });
+        }
+      var pivot = new THREE.Object3D();
+      pivot.position.set((cols-1)/2 - sheet.pect.atCol, midR - sheet.pect.atRow,
+        side*(sheet.thick[sheet.pect.atCol]+0.6));
+      pivot.userData.side = side;
+      pivot.add(makeMesh(vox, mat));
+      fish.add(pivot); pects.push(pivot);
+    });
+  }
+
+  var aura = null;
+  if (charged){
+    var d2 = dilateSet(solid);
+    var FACES = [
+      {d:[-1,0,0],n:[1,0,0]}, {d:[1,0,0],n:[-1,0,0]},
+      {d:[0,-1,0],n:[0,1,0]}, {d:[0,1,0],n:[0,-1,0]},
+      {d:[0,0,1],n:[0,0,1]}, {d:[0,0,-1],n:[0,0,-1]}
+    ];
+    var CORNERS = [[-0.5,-0.5],[0.5,-0.5],[0.5,0.5],[-0.5,0.5]];
+    var TRIS = [0,1,2,0,2,3];
+    var UVS = 1/64;
+    var groups = {};
+    d2.forEach(function(k){
+      var p = k.split(','), kc=+p[0], kr=+p[1], kz=+p[2];
+      var cc = Math.max(0, Math.min(cols-1, kc));
+      if (!segByCol[cc]) return;
+      for (var fi=0; fi<FACES.length; fi++){
+        var F = FACES[fi];
+        if (d2.has((kc+F.d[0])+','+(kr+F.d[1])+','+(kz+F.d[2]))) continue;
+        var g = groups[cc] || (groups[cc] = {pos:[],uv:[]});
+        var n = F.n;
+        var t1 = n[0] ? [0,1,0] : [1,0,0];
+        var t2 = n[2] ? [0,1,0] : [0,0,1];
+        var lx=(cc-kc)+n[0]*0.5, ly=(midR-kr)+n[1]*0.5, lz=kz+n[2]*0.5;
+        var gx=-kc+n[0]*0.5, gy=-kr+n[1]*0.5, gz=kz+n[2]*0.5;
+        for (var ti=0; ti<TRIS.length; ti++){
+          var cn = CORNERS[TRIS[ti]];
+          var ox=t1[0]*cn[0]+t2[0]*cn[1], oy=t1[1]*cn[0]+t2[1]*cn[1], oz=t1[2]*cn[0]+t2[2]*cn[1];
+          g.pos.push(lx+ox, ly+oy, lz+oz);
+          var px=gx+ox, py=gy+oy, pz=gz+oz;
+          if (n[0]) g.uv.push(pz*UVS, py*UVS);
+          else if (n[1]) g.uv.push(px*UVS, pz*UVS);
+          else g.uv.push(px*UVS, py*UVS);
+        }
+      }
+    });
+    var auraMat = new THREE.MeshBasicMaterial({map:ARC_TEX, transparent:true,
+      blending:THREE.AdditiveBlending, depthWrite:false, side:THREE.FrontSide, opacity:0.55});
+    Object.keys(groups).forEach(function(cc){
+      var g = groups[cc];
+      var geom = new THREE.BufferGeometry();
+      geom.setAttribute('position', new THREE.Float32BufferAttribute(g.pos,3));
+      geom.setAttribute('uv', new THREE.Float32BufferAttribute(g.uv,2));
+      var sheet2 = new THREE.Mesh(geom, auraMat);
+      sheet2.frustumCulled = false; sheet2.renderOrder = 4;
+      segByCol[cc].add(sheet2);
+    });
+    aura = {mat:auraMat};
+  }
+
+  fish.userData = { segments:segments, tail:tail, pects:pects, aura:aura,
+    tailAmp:sheet.tailAmp, species:sheet.id };
+  return fish;
+}
+function updateAura(f, time){
+  var ph = (f.userData.lane && f.userData.lane.ph) || 0;
+  f.userData.aura.mat.opacity = 0.5 * (0.76 + 0.24*Math.sin(time*14.3 + ph));
+}
+
+/* ─────────────────────── 2. TRIPLED SHOAL, ORBITING THE ANCHOR ────────────── */
+/* Generated rather than hand-listed so "triple the fish, multiple orbital
+   distances, but let them cluster or drift" stays easy to retune. Each lane's
+   circle is centred on a small per-fish (cx,cz) jitter rather than dead on
+   the anchor, which is what keeps the shoal from reading as perfect concentric
+   rings — some end up near each other (cluster), some end up wide apart
+   (drift), same as the reef's original loop shape (place() below is the same
+   Lissajous formula as the source artifact, just re-centred per fish). */
+
+var FISH_TOTAL = 18;              // 6 in the source artifact, tripled
+var SHELLS = [22, 36, 52, 72];    // cm — the "different distance of orbitals"
+var LANES = [];
+for (var fi = 0; fi < FISH_TOTAL; fi++){
+  var isTang = (fi % 2) === 1;
+  var sheet = isTang ? BLUETANG : CLOWNFISH;
+  var typeIdx = Math.floor(fi/2);
+  var variant = sheet.variants[typeIdx % 3];
+  var shell = SHELLS[fi % SHELLS.length];
+  var j1 = hash3(fi, 1, 7), j2 = hash3(fi, 2, 3), j3 = hash3(fi, 3, 9);
+  LANES.push({
+    sheet: sheet, variant: variant, charged: (fi % 6) === 0,
+    cx: (j1-0.5) * 16, cz: (j2-0.5) * 16,
+    rx: shell * (0.82 + j2*0.34), rz: shell * (0.82 + j3*0.34), ry: 3 + j1*3,
+    sp: (isTang ? 0.05 : 0.07) * (0.75 + j3*0.5),
+    ph: (fi/FISH_TOTAL) * Math.PI*2 + j1*1.6,
+    yOff: -14 - shell*0.34 - j2*9,        // hangs below the ceiling anchor
+    wob: 0.8 + j3*0.6,
+    scale: sheet.scale * (0.82 + j1*0.32)
+  });
+}
+var fishGroup = new THREE.Group();
+var fishes = LANES.map(function(lane){
+  var f = buildFish(lane.sheet, lane.variant, lane.charged);
+  f.scale.setScalar(lane.scale);
+  f.userData.lane = lane;
+  fishGroup.add(f);
+  return f;
+});
+
+function place(lane, time, out){
+  var a = time*lane.sp + lane.ph;
+  return out.set(
+    lane.cx + Math.sin(a)*lane.rx,
+    lane.yOff + Math.sin(a*1.7 + lane.ph)*lane.ry,
+    lane.cz + Math.cos(a*0.82)*lane.rz
+  );
+}
+
+/* ───────────────────────────── 3. SCENE / RENDERER ────────────────────────── */
+
+var video = document.getElementById('cam');
+var glc   = document.getElementById('gl');
+var gate  = document.getElementById('gate');
+var hud   = document.getElementById('hud');
+var bottomBar = document.getElementById('bottom');
+var cPink = document.getElementById('cPink'), cGreen = document.getElementById('cGreen');
+var cAnchor = document.getElementById('cAnchor'), cGyro = document.getElementById('cGyro');
+var cDist = document.getElementById('cDist');
+
+var renderer = new THREE.WebGLRenderer({canvas:glc, alpha:true, antialias:true});
+renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+
+var scene = new THREE.Scene();
+scene.add(fishGroup);
+var camera = new THREE.PerspectiveCamera(60, 1, 1, 4000);
+
+// static lighting only — no per-frame colour/exposure adjustment in this build
+scene.add(new THREE.HemisphereLight(0xE6EDFF, 0xFFE3D2, 0.62));
+var key = new THREE.DirectionalLight(0xFFFFFF, 0.58); key.position.set(1,1.5,0.9); scene.add(key);
+var fillL = new THREE.DirectionalLight(0xCFDCFF, 0.26); fillL.position.set(-1.1,-0.3,-0.8); scene.add(fillL);
+
+function fitCamera(){
+  var vw = video.videoWidth || 1280, vh = video.videoHeight || 720;
+  var sw = window.innerWidth, sh = window.innerHeight;
+  renderer.setSize(sw, sh, false);
+  var fFull = (vw/2) / Math.tan(FOV_DEG*Math.PI/360);
+  camera.fov = 2*Math.atan(vh/(2*fFull)) * 180/Math.PI;
+  camera.aspect = vw/vh;
+  var scale = Math.max(sw/vw, sh/vh);
+  var cw = sw/scale, ch = sh/scale;
+  camera.setViewOffset(vw, vh, (vw-cw)/2, (vh-ch)/2, cw, ch);
+  camera.updateProjectionMatrix();
+}
+window.addEventListener('resize', fitCamera);
+video.addEventListener('loadedmetadata', fitCamera);
+
+/* ───────────────────────── 4. GYRO → CAMERA ORIENTATION ───────────────────── */
+/* Standard device-orientation-to-quaternion conversion (the same one three.js's
+   own DeviceOrientationControls uses): device axes -> world axes, then a fixed
+   -90° tilt because the phone's "top" points at the sky while its camera looks
+   out the back, then a screen-orientation correction for portrait/landscape. */
+
+var ZEE = new THREE.Vector3(0,0,1);
+var Q0 = new THREE.Quaternion();
+var Q1 = new THREE.Quaternion(-Math.sqrt(0.5), 0, 0, Math.sqrt(0.5));
+var deviceQuat = new THREE.Quaternion();
+var eulerTmp = new THREE.Euler();
+var haveOrientation = false;
+
+function screenAngleRad(){
+  var a = (screen.orientation && typeof screen.orientation.angle === 'number')
+    ? screen.orientation.angle : (window.orientation || 0);
+  return a * Math.PI/180;
+}
+function degToRad(d){ return d * Math.PI/180; }
+function onDeviceOrientation(e){
+  if (e.alpha == null) return;
+  haveOrientation = true;
+  eulerTmp.set(
+    degToRad(e.beta || 0),
+    degToRad(e.alpha || 0),
+    degToRad(-(e.gamma || 0)),
+    'YXZ'
+  );
+  deviceQuat.setFromEuler(eulerTmp);
+  deviceQuat.multiply(Q1);
+  deviceQuat.multiply(Q0.setFromAxisAngle(ZEE, -screenAngleRad()));
+}
+
+var yawTrim = 0;                  // world-Y correction nudged by marker sightings
+var YAXIS = new THREE.Vector3(0,1,0);
+var yawQuat = new THREE.Quaternion();
+var camQuat = new THREE.Quaternion();
+
+function applyCameraOrientation(){
+  if (!haveOrientation){ camera.quaternion.identity(); return; }
+  yawQuat.setFromAxisAngle(YAXIS, yawTrim);
+  camQuat.multiplyQuaternions(yawQuat, deviceQuat);
+  camera.quaternion.copy(camQuat);
+  camera.position.set(0,0,0);      // 3DOF only: look-around from one fixed spot
+  camera.updateMatrixWorld();
+}
+
+/* ─────────────────────── 5. TWO-BLOB COLOUR DETECTOR ──────────────────────── */
+
+var det = document.createElement('canvas');
+var dctx = det.getContext('2d', {willReadFrequently:true});
+
+function rgb2hsv(r,g,b){
+  r/=255; g/=255; b/=255;
+  var mx = Math.max(r,g,b), mn = Math.min(r,g,b), d = mx-mn;
+  var h = 0;
+  if (d !== 0){
+    if (mx === r) h = 60 * (((g-b)/d) % 6);
+    else if (mx === g) h = 60 * ((b-r)/d + 2);
+    else h = 60 * ((r-g)/d + 4);
+  }
+  if (h < 0) h += 360;
+  return [h, mx===0?0:d/mx, mx];
+}
+
+var pinkPx = null, greenPx = null;   // smoothed detection-canvas pixel centroids
+var goodStreak = 0;
+var ANCHOR = new THREE.Vector3();
+var anchorReady = false;
+var lastDistCm = null;
+
+function lerp2(a,b,k){ return [a[0]+(b[0]-a[0])*k, a[1]+(b[1]-a[1])*k]; }
+
+function detect(){
+  var vw = video.videoWidth, vh = video.videoHeight;
+  if (!vw || !vh) return;
+  var scale = DET_W/vw;
+  det.width = DET_W; det.height = Math.round(vh*scale);
+  dctx.drawImage(video, 0, 0, det.width, det.height);
+  var img;
+  try { img = dctx.getImageData(0,0,det.width,det.height); } catch(e){ return; }
+  var d = img.data, w = det.width, h = det.height;
+
+  var pSum=[0,0], pN=0, pMinX=1e9,pMaxX=-1e9,pMinY=1e9,pMaxY=-1e9;
+  var gSum=[0,0], gN=0, gMinX=1e9,gMaxX=-1e9,gMinY=1e9,gMaxY=-1e9;
+
+  for (var y=0; y<h; y+=1){
+    for (var x=0; x<w; x+=1){
+      var o = (y*w+x)*4;
+      var hsv = rgb2hsv(d[o], d[o+1], d[o+2]);
+      if (hsv[1] < S_GATE || hsv[2] < V_GATE) continue;
+      var hue = hsv[0];
+      if (hue >= PINK_HUE_MIN && hue <= PINK_HUE_MAX){
+        pSum[0]+=x; pSum[1]+=y; pN++;
+        if (x<pMinX)pMinX=x; if (x>pMaxX)pMaxX=x; if (y<pMinY)pMinY=y; if (y>pMaxY)pMaxY=y;
+      } else if (hue >= GREEN_HUE_MIN && hue <= GREEN_HUE_MAX){
+        gSum[0]+=x; gSum[1]+=y; gN++;
+        if (x<gMinX)gMinX=x; if (x>gMaxX)gMaxX=x; if (y<gMinY)gMinY=y; if (y>gMaxY)gMaxY=y;
+      }
+    }
+  }
+
+  // a blob spread across most of the frame is noise/ambient colour, not a
+  // 1cm-wide marker — reject it even if the pixel count cleared the floor
+  var pOk = pN >= MIN_BLOB_PIXELS && (pMaxX-pMinX) < w*0.7 && (pMaxY-pMinY) < h*0.7;
+  var gOk = gN >= MIN_BLOB_PIXELS && (gMaxX-gMinX) < w*0.7 && (gMaxY-gMinY) < h*0.7;
+
+  cPink.textContent = 'PINK ' + (pOk ? ('✓ '+pN) : '—');
+  cPink.className = 'chip' + (pOk?' on':' off');
+  cGreen.textContent = 'GREEN ' + (gOk ? ('✓ '+gN) : '—');
+  cGreen.className = 'chip' + (gOk?' on':' off');
+
+  if (pOk){
+    var pc = [pSum[0]/pN, pSum[1]/pN];
+    pinkPx = pinkPx ? lerp2(pinkPx, pc, 0.4) : pc;
+  }
+  if (gOk){
+    var gc = [gSum[0]/gN, gSum[1]/gN];
+    greenPx = greenPx ? lerp2(greenPx, gc, 0.4) : gc;
+  }
+
+  if (pOk && gOk){
+    goodStreak++;
+  } else {
+    goodStreak = 0;
+    return;
+  }
+  if (goodStreak < GOOD_STREAK_NEEDED) return;
+
+  // pixel separation -> distance, using the known 50cm real separation
+  var dx = greenPx[0]-pinkPx[0], dy = greenPx[1]-pinkPx[1];
+  var dpx = Math.hypot(dx, dy);
+  if (dpx < 2) return;
+  var f = (det.width/2) / Math.tan(FOV_DEG*Math.PI/360);
+  var camDist = (f * MARKER_SEP_CM) / dpx;
+  lastDistCm = camDist;
+
+  // midpoint pixel -> a ray through the camera's current orientation
+  var mx = (pinkPx[0]+greenPx[0])/2, my = (pinkPx[1]+greenPx[1])/2;
+  var cx = det.width/2, cy = det.height/2;
+  var dirCam = new THREE.Vector3((mx-cx)/f, -(my-cy)/f, -1).normalize();
+  var ptCam = dirCam.multiplyScalar(camDist);
+  var ptWorld = ptCam.applyQuaternion(camQuat); // camera sits at world origin
+
+  if (!anchorReady){
+    ANCHOR.copy(ptWorld);
+    anchorReady = true;
+  } else {
+    // yaw drift correction: both bearings are measured from the origin, so
+    // any gap between them is exactly the gyro's accumulated yaw error
+    var bAnchor = Math.atan2(ANCHOR.x, ANCHOR.z);
+    var bNow = Math.atan2(ptWorld.x, ptWorld.z);
+    var err = Math.atan2(Math.sin(bAnchor-bNow), Math.cos(bAnchor-bNow));
+    yawTrim += Math.max(-0.05, Math.min(0.05, err * 0.15));
+    ANCHOR.lerp(ptWorld, 0.04);
+  }
+}
+
+/* ────────────────────────────── 6. ANIMATION ──────────────────────────────── */
+
+var clock = new THREE.Clock();
+var t = 0, tmpA = new THREE.Vector3(), tmpB = new THREE.Vector3();
+var lastDetect = 0;
+
+function frame(){
+  requestAnimationFrame(frame);
+  var dt = Math.min(clock.getDelta(), 0.05);
+  t += dt;
+
+  applyCameraOrientation();
+
+  var now = performance.now();
+  if (now - lastDetect > DET_MS){ lastDetect = now; detect(); }
+
+  cAnchor.textContent = anchorReady ? 'ANCHOR OK' : 'ANCHOR SEARCHING';
+  cAnchor.className = 'chip' + (anchorReady ? ' on' : '');
+  cGyro.textContent = 'GYRO ' + (haveOrientation ? 'OK' : (motionDenied ? 'DENIED' : '—'));
+  cGyro.className = 'chip' + (haveOrientation ? ' on' : (motionDenied ? ' off' : ''));
+  cDist.textContent = lastDistCm ? (Math.round(lastDistCm) + ' cm') : '— cm';
+
+  fishGroup.visible = anchorReady;
+  if (anchorReady) fishGroup.position.copy(ANCHOR);
+
+  for (var i=0;i<fishes.length;i++){
+    var f = fishes[i], lane = f.userData.lane;
+    var st = t;
+    place(lane, st, f.position);
+    place(lane, st+0.05, tmpB);
+    var dpos = tmpB.clone().sub(f.position);
+    var flat = Math.hypot(dpos.x, dpos.z) || 1e-4;
+    f.rotation.y = Math.atan2(-dpos.z, dpos.x);
+    f.rotation.z = Math.atan2(dpos.y, flat) * 0.75;
+
+    var yaw = f.rotation.y, prevYaw = f.userData.prevYaw;
+    if (prevYaw !== undefined){
+      var dYaw = Math.atan2(Math.sin(yaw-prevYaw), Math.cos(yaw-prevYaw));
+      f.userData.roll = (f.userData.roll||0)*0.9 + dYaw*8;
+    }
+    f.userData.prevYaw = yaw;
+    f.rotation.x = Math.max(-0.4, Math.min(0.4, f.userData.roll||0));
+
+    var beat = t*(2.4+lane.wob) + lane.ph*3;
+    var segs = f.userData.segments;
+    for (var s=0;s<segs.length;s++){
+      var seg = segs[s], w2 = seg.userData.t*seg.userData.t;
+      seg.position.z = Math.sin(beat - seg.userData.t*3.1) * w2 * 1.15 * f.userData.tailAmp;
+    }
+    var tailPhase = Math.sin(beat-3.1);
+    f.userData.tail.position.z = tailPhase*1.15*f.userData.tailAmp;
+    f.userData.tail.rotation.y = tailPhase*0.62;
+
+    var pf = t*5.2 + lane.ph;
+    for (var p=0;p<f.userData.pects.length;p++){
+      var pv = f.userData.pects[p];
+      pv.rotation.y = pv.userData.side*(0.35+Math.sin(pf+p*0.8)*0.45);
+      pv.rotation.z = Math.sin(pf*0.7+p)*0.18;
+    }
+    if (f.userData.aura) updateAura(f, t);
+  }
+
+  ARC_TEX.offset.x = (t*0.055)%1;
+  ARC_TEX.offset.y = (t*0.035)%1;
+
+  renderer.render(scene, camera);
+}
+
+/* ─────────────────────────────── 7. BOOT ──────────────────────────────────── */
+
+var motionDenied = false;
+
+function fail(msg){
+  gate.classList.remove('hidden');
+  document.getElementById('gatemsg').textContent = msg;
+}
+
+document.getElementById('go').addEventListener('click', function(){
+  var motionAsk = (typeof DeviceOrientationEvent !== 'undefined' &&
+    typeof DeviceOrientationEvent.requestPermission === 'function')
+    ? DeviceOrientationEvent.requestPermission() : Promise.resolve('granted');
+
+  motionAsk.then(function(res){
+    if (res !== 'granted') motionDenied = true;
+    window.addEventListener('deviceorientation', onDeviceOrientation, true);
+  }).catch(function(){ motionDenied = true; });
+
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia){
+    fail('이 브라우저에서는 카메라를 쓸 수 없어요. Safari나 Chrome에서 열어주세요.');
+    return;
+  }
+  navigator.mediaDevices.getUserMedia({
+    video:{ facingMode:{ideal:'environment'}, width:{ideal:1280}, height:{ideal:720} },
+    audio:false
+  }).then(function(stream){
+    video.srcObject = stream;
+    return video.play();
+  }).then(function(){
+    gate.classList.add('hidden');
+    hud.classList.remove('hidden');
+    bottomBar.classList.remove('hidden');
+    fitCamera();
+  }).catch(function(err){
+    fail('카메라 권한이 거부됐어요 (' + (err && err.name ? err.name : 'error') + '). https 주소인지, 권한 설정을 확인해주세요.');
+  });
+});
+
+document.getElementById('reset').addEventListener('click', function(){
+  anchorReady = false; goodStreak = 0; yawTrim = 0;
+  pinkPx = null; greenPx = null;
+});
+
+fitCamera();
+frame();
+
+})();
+</script>
+
+</body>
+</html>
