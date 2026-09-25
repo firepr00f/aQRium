@@ -32,7 +32,7 @@
   @keyframes pop{from{opacity:0;transform:translate(-50%,-90%) scale(.9)}to{opacity:1}}
   @keyframes fade{to{opacity:0;transform:translate(-50%,-115%)}}
 
-  /* ---- start screen ---- */
+  /* 시작 화면 */
   #gate{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;
     justify-content:center;gap:18px;padding:28px;text-align:center;
     background:radial-gradient(120% 90% at 50% 20%,#241C40 0%,#0F0C1A 70%);z-index:5}
@@ -44,7 +44,7 @@
   #go:active{transform:translateY(1px)}
   .fine{font-family:ui-monospace,monospace;font-size:11px;letter-spacing:.05em;color:#6F6690}
 
-  /* ---- hud ---- */
+  /* 위쪽 상태 표시줄 */
   #hud{position:absolute;left:0;right:0;top:0;padding:calc(10px + env(safe-area-inset-top,0px)) 14px 10px;
     display:flex;justify-content:space-between;align-items:flex-start;gap:10px;pointer-events:none}
   .chip{font-family:ui-monospace,monospace;font-size:10.5px;letter-spacing:.06em;
@@ -87,29 +87,26 @@
 "use strict";
 
 /* ═══════════════════════════════════════════════════════════════════════════
-   VOXEL REEF — marker-anchored AR viewer
+   복셀 산호초 AR
    ---------------------------------------------------------------------------
-   Pose comes from the printed QR's own four corners. jsQR already localises
-   them to sub-pixel accuracy every frame, which is both more robust and far
-   cheaper than hand-rolling a blob detector, and it means the code that
-   carries the scene is also the thing that anchors it.
+   종이에 인쇄된 QR코드의 네 모서리로 카드의 위치와 각도를 알아낸다.
+   QR을 읽어주는 라이브러리(jsQR)가 모서리 위치를 이미 알려주기 때문에
+   따로 마커 인식 코드를 만들 필요가 없고, 장면을 띄우는 코드와
+   위치를 잡는 기준이 같은 QR이라 편하다.
 
-   Because the pose is known, the colour patches printed at fixed offsets from
-   the QR can be projected back into the camera image and sampled. That gives
-   a live white-balance and exposure reading of the room, which is what stops
-   the turtles looking pasted on — and, since the six chromatic patches (not
-   just white/grey/black) are read too, a live saturation reading: if the
-   card itself carries no colour (printed in grayscale, or lit by monochrome
-   light), the six patches that should read as distinct hues all come back
-   the same grey, and the overlay is desaturated to match.
+   카드 위치를 알면 QR 옆에 인쇄된 색 칸들이 사진 어디에 찍혔는지도
+   계산할 수 있다. 그 칸들의 색을 읽어서 방 조명의 밝기와 색을 알아내
+   거북이가 화면에서 겉돌지 않게 맞춘다. 또 카드가 흑백으로 인쇄됐거나
+   흑백 조명 아래에 있으면 색 칸들이 전부 회색으로 읽히는데, 이때는
+   거북이 색도 같이 흐리게 만든다.
 
-   Scene source, in order of precedence:
-     #d=<base64url json>   scene inlined in the link
-     #s=<id>               look up <id> in ./scenes.json beside this file
-     (nothing)             the built-in demo scene
+   장면 데이터를 가져오는 순서:
+     #d=<인코딩된 json>   링크 안에 장면이 통째로 들어있는 경우
+     #s=<id>              이 파일 옆 scenes.json에서 id로 찾는 경우
+     (아무것도 없음)      기본으로 들어있는 데모 장면
    ═══════════════════════════════════════════════════════════════════════════ */
 
-/* ───────────────────────────── 1. SCENE CONFIG ────────────────────────────── */
+/* ───────────────────────────── 1. 장면 설정 ────────────────────────────── */
 
 var DEMO = {
   v:1, name:"Demo reef", qr:8.0, fov:63,
@@ -124,18 +121,18 @@ var DEMO = {
   ]
 };
 
+// 링크에 들어있는 글자를 원래 글자로 되돌림
 function b64urlDecode(s){
   s = s.replace(/-/g,'+').replace(/_/g,'/');
   while (s.length % 4) s += '=';
   return decodeURIComponent(escape(atob(s)));
 }
 
-/* Where scenes.json is read from, best first.
+/* scenes.json을 어디서 읽을지 정하는 부분 (앞에 있을수록 먼저 시도)
 
-   A GitHub Pages address already tells us the repo, so the raw file can be
-   read straight from the branch. That matters: a commit reaches raw within
-   seconds, while the Pages copy waits on a site rebuild. The relative path
-   stays as the fallback so this file works anywhere it is hosted. */
+   깃허브 페이지 주소면 저장소 이름을 알 수 있어서 원본 파일을 바로 읽는다.
+   원본은 수정하고 몇 초면 반영되는데, 페이지는 다시 빌드될 때까지
+   기다려야 해서 느리기 때문이다. 어디서든 돌아가게 상대경로는 마지막에 둔다. */
 function scenesSources(){
   var out = [];
   var m = location.hostname.match(/^([^.]+)\.github\.io$/i);
@@ -150,6 +147,7 @@ function scenesSources(){
 
 var SCENE_ID = null, SCENE_RAW = null;
 
+// 주소 목록을 차례대로 시도해서 처음 성공한 내용을 가져옴
 function fetchScenes(){
   var urls = scenesSources(), i = 0;
   function attempt(){
@@ -162,6 +160,7 @@ function fetchScenes(){
   return attempt();
 }
 
+// 주소 뒤의 값을 보고 어떤 장면을 쓸지 정함
 function loadScene(){
   var h = location.hash.replace(/^#/, '');
   if (h.indexOf('d=') === 0){
@@ -180,9 +179,9 @@ function loadScene(){
   });
 }
 
-/* Re-read every 15s so an edit published from the console lands without the
-   viewer being reloaded. Rebuild only when the bytes actually changed, or the
-   turtles would restart their laps every quarter minute. */
+/* 15초마다 다시 읽어서, 수정한 내용이 새로고침 없이 반영되게 함.
+   내용이 바뀐 경우에만 다시 만든다. 안 그러면 15초마다
+   거북이가 처음 위치로 돌아가 버린다. */
 function watchScene(){
   if (!SCENE_ID) return;
   setInterval(function(){
@@ -201,8 +200,9 @@ function watchScene(){
   }, 15000);
 }
 
-/* ───────────────────────── 2. TURTLE MODELS (voxel) ───────────────────────── */
+/* ───────────────────────── 2. 거북이 모델 (네모 블록) ───────────────────────── */
 
+// 거북이 종류별 색 설정
 var MORPHS = [
   { id:'cream',  body:'#F6E7C4', shell:'#83C43C', line:'#63A128', eye:'#1F1C26', pattern:true },
   { id:'lime',   body:'#CBDC8E', shell:'#C79272', line:'#A6735A', eye:'#1F1C26', pattern:true },
@@ -210,12 +210,14 @@ var MORPHS = [
     pattern:false, jelly:true, cream:'#FFFDF7', cherry:'#B8332B', stem:'#4A3222' }
 ];
 
+// 블록 하나의 모양. 모든 블록이 이걸 같이 쓴다
 var BOX = new THREE.BoxBufferGeometry(1,1,1);
 (function(){
   var n = BOX.attributes.position.count, w = new Float32Array(n*3);
   w.fill(1); BOX.setAttribute('color', new THREE.BufferAttribute(w,3));
 })();
 
+// 블록 위치·색 목록을 받아 한 덩어리로 묶어서 그림
 function makeMesh(voxels, material){
   var mesh = new THREE.InstancedMesh(BOX, material, voxels.length);
   var m = new THREE.Matrix4();
@@ -230,6 +232,7 @@ function makeMesh(voxels, material){
   return mesh;
 }
 
+// 등껍질 무늬를 작은 픽셀 그림으로 만듦
 function shellPatternTex(shellHex, lineHex){
   var cv = document.createElement('canvas');
   cv.width = 9; cv.height = 8;
@@ -246,22 +249,26 @@ function shellPatternTex(shellHex, lineHex){
   return t;
 }
 
+// 거북이 한 마리를 블록으로 조립
 function buildTurtle(m){
   var BODY = new THREE.Color(m.body), SHELL = new THREE.Color(m.shell),
       LINE = new THREE.Color(m.line), EYE = new THREE.Color(m.eye);
 
   var soft = [], carapace = [];
+  // 범위 안을 블록으로 가득 채움
   function fill(list, x0,x1,y0,y1,z0,z1,c){
     for (var x=x0;x<=x1;x++) for (var y=y0;y<=y1;y++) for (var z=z0;z<=z1;z++)
       list.push({x:x,y:y,z:z,c:(typeof c === 'function') ? c(x,y,z) : c});
   }
 
+  // 몸통, 꼬리, 머리(눈 두 개 포함)
   fill(soft, 1, 7, 0, 1, -3, 2, BODY);
   fill(soft, -2, -1, 1, 1, -1, 0, BODY);
   fill(soft, 9, 12, 1, 3, -2, 1, function(x,y,z){
     return (x === 11 && y === 2 && (z === -2 || z === 1)) ? EYE : BODY;
   });
 
+  // 등껍질 (젤리 종류가 아닐 때만)
   if (!m.jelly){
     fill(carapace, 0, 8, 2, 3, -4, 3, SHELL);
     for (var sx = 0; sx <= 8; sx++) for (var sz = -4; sz <= 3; sz++){
@@ -273,13 +280,14 @@ function buildTurtle(m){
 
   var matteMat = new THREE.MeshLambertMaterial({vertexColors:true});
   var turtle = new THREE.Group();
-  var bob = new THREE.Object3D(); turtle.add(bob);
-  var centre = new THREE.Object3D();
+  var bob = new THREE.Object3D(); turtle.add(bob);     // 둥실둥실 움직이는 부분
+  var centre = new THREE.Object3D();                   // 모델 중심 맞추기용
   centre.position.set(-4.5, -2, 0);
   bob.add(centre);
   centre.add(makeMesh(soft, matteMat));
 
   if (m.jelly){
+    // 젤리 종류: 반투명 껍질 + 크림 + 체리
     var jellyBase = new THREE.MeshPhongMaterial({
       color:m.shell, transparent:true, opacity:0.8,
       shininess:5, specular:0x0e1311, side:THREE.FrontSide
@@ -303,6 +311,7 @@ function buildTurtle(m){
     cherry.position.set(4.5, 8, -0.5);
     centre.add(cherry);
 
+    // 체리 꼭지 (막대 두 개를 꺾어서 이음)
     var stemMat = new THREE.MeshLambertMaterial({color:m.stem});
     var sA = new THREE.Object3D(); sA.position.set(4.5, 8.5, -0.5); sA.rotation.z = -0.24;
     var segA = new THREE.Mesh(new THREE.BoxBufferGeometry(0.13, 0.95, 0.13), stemMat);
@@ -315,6 +324,7 @@ function buildTurtle(m){
     centre.add(makeMesh(carapace, new THREE.MeshLambertMaterial({vertexColors:true})));
   }
 
+  // 지느러미 네 개 (앞 두 개는 크게, 뒤 두 개는 작게). 위아래로 젓는다
   var flippers = [];
   [[6,-3,-1,4,0.50],[6,2,1,4,0.50],[2,-3,-1,3,0.32],[2,2,1,3,0.32]].forEach(function(sp, idx){
     var vox = [];
@@ -331,17 +341,17 @@ function buildTurtle(m){
   return turtle;
 }
 
-/* ─────────────────────── 3. POSE FROM FOUR MARKER CORNERS ─────────────────── */
+/* ─────────────────────── 3. QR 네 모서리로 카드 위치 계산 ─────────────────── */
 
-// Solve the 8 unknowns of a plane->image homography from 4 correspondences.
-function homography(src, dst){          // src: [[X,Z]x4] plane, dst: [[u,v]x4] image
+// 카드 위의 네 점과 사진 속 네 점을 짝지어서, 카드 평면이 사진에 어떻게 찍혔는지 구함
+function homography(src, dst){          // src: 카드 위 좌표 4개, dst: 사진 속 좌표 4개
   var A = [], i;
   for (i = 0; i < 4; i++){
     var X = src[i][0], Z = src[i][1], u = dst[i][0], v = dst[i][1];
     A.push([X, Z, 1, 0, 0, 0, -u*X, -u*Z, u]);
     A.push([0, 0, 0, X, Z, 1, -v*X, -v*Z, v]);
   }
-  // Gaussian elimination with partial pivoting
+  // 연립방정식 풀기 (가우스 소거법)
   for (i = 0; i < 8; i++){
     var piv = i;
     for (var r = i+1; r < 8; r++) if (Math.abs(A[r][i]) > Math.abs(A[piv][i])) piv = r;
@@ -359,9 +369,9 @@ function homography(src, dst){          // src: [[X,Z]x4] plane, dst: [[u,v]x4] 
   return [[h[0],h[1],h[2]],[h[3],h[4],h[5]],[h[6],h[7],1]];
 }
 
-// Decompose H into rotation + translation given pinhole intrinsics.
-// Columns of H map the plane's X and Z axes; their cross product is the
-// marker's normal, which becomes world +Y.
+// 위에서 구한 값으로 카드의 방향(회전)과 위치를 계산함.
+// 카드의 가로축, 세로축 방향을 구하고, 둘을 곱해서 카드가 바라보는
+// 방향(위쪽)을 얻는다.
 function poseFromH(H, fx, fy, cx, cy){
   function Kinv(c0, c1, c2){ return [ (c0 - cx*c2)/fx, (c1 - cy*c2)/fy, c2 ]; }
   var a = Kinv(H[0][0], H[1][0], H[2][0]);
@@ -370,33 +380,33 @@ function poseFromH(H, fx, fy, cx, cy){
 
   var na = Math.hypot(a[0],a[1],a[2]), nb = Math.hypot(b[0],b[1],b[2]);
   if (!na || !nb) return null;
-  var lam = 2 / (na + nb);              // average the two for stability
+  var lam = 2 / (na + nb);              // 두 축 길이의 평균으로 크기를 맞춤 (흔들림 줄이기)
   var r1 = [a[0]*lam, a[1]*lam, a[2]*lam];
   var r2 = [b[0]*lam, b[1]*lam, b[2]*lam];
   var tv = [t[0]*lam, t[1]*lam, t[2]*lam];
-  if (tv[2] < 0){                       // marker must be in front of the lens
+  if (tv[2] < 0){                       // 카드는 카메라 앞에 있어야 하니까 뒤집혔으면 되돌림
     r1 = r1.map(function(v){return -v;});
     r2 = r2.map(function(v){return -v;});
     tv = tv.map(function(v){return -v;});
   }
-  // Gram-Schmidt: force the two axes orthonormal before taking the normal
+  // 두 축이 서로 정확히 직각이 되도록 살짝 보정
   var d = r1[0]*r2[0] + r1[1]*r2[1] + r1[2]*r2[2];
   var c1 = [r1[0] - d*r2[0]*0.5, r1[1] - d*r2[1]*0.5, r1[2] - d*r2[2]*0.5];
   var c2 = [r2[0] - d*r1[0]*0.5, r2[1] - d*r1[1]*0.5, r2[2] - d*r1[2]*0.5];
   var l1 = Math.hypot(c1[0],c1[1],c1[2]), l2 = Math.hypot(c2[0],c2[1],c2[2]);
   c1 = [c1[0]/l1, c1[1]/l1, c1[2]/l1];
   c2 = [c2[0]/l2, c2[1]/l2, c2[2]/l2];
-  // c2 x c1, not c1 x c2: the card's +X runs right and its +Z runs DOWN the
-  // card toward the colour strip, so the outward normal is Z^ x X^. Taking the
-  // other order still reprojects perfectly but yields a reflection, and the
-  // turtles end up swimming under the table.
+  // 곱하는 순서 주의: c1×c2가 아니라 c2×c1이어야 함.
+  // 카드의 가로축(X)은 오른쪽, 세로축(Z)은 색 띠 쪽인 아래로 향한다.
+  // 순서를 반대로 하면 그림은 맞아 보여도 위아래가 뒤집혀서
+  // 거북이가 테이블 아래로 헤엄치게 된다.
   var c3 = [ c2[1]*c1[2] - c2[2]*c1[1],
              c2[2]*c1[0] - c2[0]*c1[2],
              c2[0]*c1[1] - c2[1]*c1[0] ];
   return { r1:c1, r2:c2, n:c3, t:tv };
 }
 
-/* ───────────────────────── 4. RENDERER AND SCENE ──────────────────────────── */
+/* ───────────────────────── 4. 화면 그리기 준비 ──────────────────────────── */
 
 var video   = document.getElementById('cam');
 var glc     = document.getElementById('gl');
@@ -412,12 +422,13 @@ renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
 
 var scene  = new THREE.Scene();
 var camera = new THREE.PerspectiveCamera(60, 1, 1, 4000);
-camera.matrixAutoUpdate = false;
+camera.matrixAutoUpdate = false;   // 카메라 위치는 카드에서 계산해서 직접 넣음
 
-// world units are centimetres, with the marker lying on the XZ plane at y=0
+// 단위는 cm이고, 카드는 y=0인 바닥면에 놓여 있다고 본다
 var world = new THREE.Group();
 scene.add(world);
 
+// 조명 세 개 (하늘빛, 메인 빛, 보조 빛)
 var hemi = new THREE.HemisphereLight(0xE8EFFF, 0xFFE6D6, 0.62);
 var key  = new THREE.DirectionalLight(0xFFFFFF, 0.58);
 key.position.set(1.0, 1.5, 0.9);
@@ -425,8 +436,8 @@ var fill = new THREE.DirectionalLight(0xD2DEFF, 0.26);
 fill.position.set(-1.1, -0.3, -0.8);
 scene.add(hemi); scene.add(key); scene.add(fill);
 
-// a soft contact shadow under the shoal: cheap, and it does more for grounding
-// than any amount of lighting work
+// 거북이 아래 깔리는 흐릿한 그림자.
+// 간단하지만 바닥에 붙어 있는 느낌이 훨씬 잘 난다
 var shadowTex = (function(){
   var s = 128, cv = document.createElement('canvas');
   cv.width = cv.height = s;
@@ -440,13 +451,14 @@ var shadowTex = (function(){
 
 var CFG = null, turtles = [], picks = [];
 
-/* The card is printed on one side, so only that side exists. Every swim path
-   is held at least this many centimetres clear of the printed face; nothing is
-   ever placed behind it, where a real card or wall would hide it anyway. */
+/* 카드는 한쪽 면에만 인쇄되어 있으니 그쪽 면에서만 거북이가 보인다.
+   헤엄치는 길은 인쇄된 면에서 최소 이만큼(cm) 떨어뜨려 놓고,
+   카드나 벽 뒤쪽에는 아무것도 두지 않는다. */
 var WALL = false;
 var CEILING = false;
 var CLEAR = 6;
 
+// 설정값대로 거북이들을 만들어서 장면에 올림
 function buildScene(cfg){
   CFG = cfg;
   WALL = !!cfg.wall;
@@ -455,33 +467,27 @@ function buildScene(cfg){
   while (world.children.length) world.remove(world.children[0]);
   turtles = []; picks = [];
 
-  /* Flat on a table, the marker's normal already is "up" and nothing moves.
-     Taped to a wall, that normal points horizontally at the viewer instead, so
-     turning the swim space a quarter turn about X puts the turtles back on a
-     level plane: they then cross in front of the wall rather than crawling up
-     it. Up-the-card becomes up, out-of-the-wall becomes depth.
+  /* 테이블 위에 놓은 카드는 위쪽이 그대로 '위'라서 손댈 게 없다.
+     벽에 붙인 카드는 위쪽이 사람 쪽을 향하므로, 공간을 90도 눕혀서
+     거북이가 벽을 타고 기어오르지 않고 벽 앞을 가로질러 헤엄치게 한다.
 
-     Stuck to a ceiling, the card's outward normal points DOWN — the same
-     invariant that keeps everything on the printed side (see place() below)
-     places the turtles below the ceiling for free, no axis remap needed. The
-     only thing that axis doesn't fix is which way the model itself is drawn:
-     it is built assuming "away from print" is real up, so on a ceiling it
-     comes out belly-up unless each turtle is rolled 180° — done per-turtle
-     below, not here, since it is about the model, not the swim space. */
+     천장에 붙인 카드는 위쪽이 아래를 향하므로, 거북이가 천장 아래에
+     자연스럽게 놓인다 (아래 place() 참고). 다만 모델이 '카드에서 멀어지는
+     방향 = 위'로 만들어져 있어서 그대로 두면 배를 위로 하고 뜨게 된다.
+     그래서 거북이마다 180도 돌려주는데, 이건 공간이 아니라 모델의
+     문제라서 아래 반복문 안에서 처리한다. */
   world.rotation.x = cfg.wall ? -Math.PI / 2 : 0;
 
   (cfg.turtles || []).forEach(function(spec, i){
     var t = buildTurtle(MORPHS[spec.morph % MORPHS.length]);
-    // model is ~14 units nose to tail; a real green turtle is ~90cm, but at
-    // that size one fills a desk — scene scale is the author's call
+    // 모델은 코부터 꼬리까지 약 14칸. 실제 바다거북은 90cm쯤인데
+    // 그 크기로 하면 책상이 꽉 차니까 크기는 만드는 사람이 정하게 함
     var s = 0.30 * (spec.sc || 1);
     t.scale.setScalar(s);
     t.rotation.order = 'YZX';
     if (CEILING){
-      // Roll the whole model 180° about its own nose-tail axis so the back
-      // faces the ceiling instead of the floor. A wrapper keeps this
-      // independent of the yaw/pitch frame() layers on top every frame to
-      // aim the model at its travel direction.
+      // 모델을 몸통 방향 축으로 180도 돌려서 등이 천장 쪽을 보게 함.
+      // 별도 그룹에 담아서, 매 프레임 진행 방향을 보게 하는 회전과 섞이지 않게 한다.
       var roll = new THREE.Group();
       roll.rotation.x = Math.PI;
       while (t.children.length) roll.add(t.children[0]);
@@ -493,7 +499,7 @@ function buildScene(cfg){
     turtles.push(t);
 
     var sh = null;
-    if (!cfg.wall && !CEILING){           // nothing to cast onto on a wall or ceiling
+    if (!cfg.wall && !CEILING){           // 벽이나 천장에는 그림자가 질 곳이 없음
       sh = new THREE.Mesh(
         new THREE.PlaneBufferGeometry(26*s, 26*s),
         new THREE.MeshBasicMaterial({map:shadowTex, transparent:true, depthWrite:false})
@@ -505,8 +511,8 @@ function buildScene(cfg){
     }
     t.userData.shadow = sh;
 
-    // one invisible box per turtle to catch taps — far cheaper and far more
-    // forgiving than raycasting thousands of instanced voxels
+    // 터치 확인용으로 거북이마다 보이지 않는 상자를 하나씩 둠.
+    // 블록 수천 개를 일일이 검사하는 것보다 훨씬 가볍고 누르기도 쉽다
     var hit = new THREE.Mesh(
       new THREE.BoxBufferGeometry(17*s, 12*s, 15*s),
       new THREE.MeshBasicMaterial({visible:false})
@@ -517,20 +523,22 @@ function buildScene(cfg){
   });
 }
 
-/* ────────────────────────── 5. MARKER TRACKING LOOP ───────────────────────── */
+/* ────────────────────────── 5. QR 찾기 반복 ───────────────────────── */
 
 var det = document.createElement('canvas');
 var dctx = det.getContext('2d', {willReadFrequently:true});
-var DET_W = 360;
+var DET_W = 360;   // QR 찾을 때는 가로 360px로 줄여서 봄 (빠르게 하려고)
 
 var pose = null, poseAge = 1e9, lastDetect = 0;
 var smooth = { t:null, r1:null, r2:null, n:null };
 var wbGain = new THREE.Color(1,1,1), wbExposure = 1, wbSaturation = 1;
 
+// 두 값 사이를 k 비율만큼 섞음
 function lerp3(a, b, k){
   return [a[0]+(b[0]-a[0])*k, a[1]+(b[1]-a[1])*k, a[2]+(b[2]-a[2])*k];
 }
 
+// 카메라 화면 한 장에서 QR을 찾고 카드 위치를 갱신함
 function detect(){
   var vw = video.videoWidth, vh = video.videoHeight;
   if (!vw || !vh) return;
@@ -544,9 +552,9 @@ function detect(){
   if (!code || !code.location) return;
 
   var L = code.location;
-  var q = (CFG && CFG.qr ? CFG.qr : 8.0);      // printed QR side, centimetres
+  var q = (CFG && CFG.qr ? CFG.qr : 8.0);      // 인쇄된 QR 한 변 길이 (cm)
   var half = q / 2;
-  // jsQR corner order, and the same corners in marker-plane coordinates
+  // 카드 위 모서리 좌표와, 사진에서 찾은 같은 모서리 좌표 (순서 맞춰서)
   var srcPts = [[-half,-half],[half,-half],[half,half],[-half,half]];
   var dstPts = [
     [L.topLeftCorner.x,     L.topLeftCorner.y],
@@ -563,8 +571,8 @@ function detect(){
   var p = poseFromH(H, f, f, det.width / 2, det.height / 2);
   if (!p || !isFinite(p.t[2])) return;
 
-  // exponential smoothing — a raw per-frame pose jitters enough to read as
-  // vibration on a 10cm marker
+  // 이전 값과 섞어서 부드럽게 만듦. 프레임마다 나온 값을 그대로 쓰면
+  // 10cm짜리 카드에서는 화면이 떨려 보인다
   if (!smooth.t){ smooth.t = p.t; smooth.r1 = p.r1; smooth.r2 = p.r2; smooth.n = p.n; }
   else {
     var k = 0.35;
@@ -579,13 +587,14 @@ function detect(){
   if (CFG) CFG._detW = det.width;
 }
 
-/* Colour patches sit at fixed offsets from the QR, so once the homography is
-   known their pixels can be found without searching for them. Nine patches,
-   left to right: R G B C M Y, white, 50% grey, black. */
+/* 색 칸은 QR에서 정해진 거리에 있어서, 카드 위치만 알면 찾아다닐 필요 없이
+   사진 속 어느 픽셀인지 바로 계산된다.
+   칸은 왼쪽부터 순서대로 빨강 초록 파랑 하늘 자홍 노랑, 흰색, 회색(50%), 검정 총 9개. */
 var PATCH_REF = [
   [255,0,0],[0,255,0],[0,0,255],[0,255,255],[255,0,255],[255,255,0],
   [255,255,255],[128,128,128],[0,0,0]
 ];
+// 9개 색 칸을 읽어서 조명의 색·밝기·색감을 알아냄
 function sampleCard(img, H){
   var q = (CFG && CFG.qr ? CFG.qr : 8.0);
   var read = [], i;
@@ -594,8 +603,9 @@ function sampleCard(img, H){
     var w = H[2][0]*X + H[2][1]*Z + 1;
     var u = Math.round((H[0][0]*X + H[0][1]*Z + H[0][2]) / w);
     var v = Math.round((H[1][0]*X + H[1][1]*Z + H[1][2]) / w);
-    if (u < 1 || v < 1 || u >= img.width-1 || v >= img.height-1) return;   // card partly out of frame
+    if (u < 1 || v < 1 || u >= img.width-1 || v >= img.height-1) return;   // 카드가 화면 밖으로 잘렸으면 그만둠
     var r=0,g=0,b=0,n=0;
+    // 그 픽셀 주변 3x3칸의 평균 색을 씀
     for (var dy=-1; dy<=1; dy++) for (var dx=-1; dx<=1; dx++){
       var o = ((v+dy)*img.width + (u+dx))*4;
       r += img.data[o]; g += img.data[o+1]; b += img.data[o+2]; n++;
@@ -605,7 +615,7 @@ function sampleCard(img, H){
   var white = read[6], black = read[8];
   var rr = Math.max(1, white[0]-black[0]), gg = Math.max(1, white[1]-black[1]), bb = Math.max(1, white[2]-black[2]);
   var avg = (rr+gg+bb)/3;
-  // clamped so a bad read can never wash the models out
+  // 잘못 읽었을 때 거북이가 너무 밝거나 어두워지지 않게 범위를 제한함
   var gr = Math.min(1.35, Math.max(0.74, avg/rr));
   var gg2= Math.min(1.35, Math.max(0.74, avg/gg));
   var gb = Math.min(1.35, Math.max(0.74, avg/bb));
@@ -613,51 +623,49 @@ function sampleCard(img, H){
   var grey = (read[7][0]+read[7][1]+read[7][2])/3;
   wbExposure = Math.min(1.25, Math.max(0.6, grey / 118));
 
-  /* The white/black/grey patches only ever tell us the print's tonal range —
-     they read the same whether the card is full colour or a grayscale photocopy,
-     because a neutral patch has no hue to lose. The six R G B C M Y patches are
-     read above into read[0..5] but, until now, never looked at again. A patch
-     printed as an actual saturated colour comes back with its channels spread
-     apart (max-min large relative to the tonal range just measured); a patch
-     printed as grey — same ink, no colour — comes back with its channels
-     bunched together no matter how well lit it is. Averaging that spread over
-     all six is a live "does this card actually carry colour" reading. */
+  /* 흰색, 검정, 회색 칸은 밝기 범위만 알려준다. 색이 없는 칸이라
+     컬러로 인쇄했든 흑백으로 복사했든 똑같이 읽히기 때문이다.
+     빨강~노랑 여섯 칸은 위에서 read[0]~read[5]에 읽어만 두고
+     지금까지 쓰지 않았다. 진짜 색으로 인쇄됐으면 R, G, B 값의 차이가 크게 나고,
+     회색으로 인쇄됐으면 아무리 밝게 비춰도 세 값이 거의 같다.
+     여섯 칸의 이 차이를 평균 내면 카드에 색이 실제로 있는지 알 수 있다. */
   var chroma = 0;
   for (i = 0; i < 6; i++){
     var p = read[i];
     chroma += (Math.max(p[0],p[1],p[2]) - Math.min(p[0],p[1],p[2])) / avg;
   }
   chroma /= 6;
-  var EXPECTED_CHROMA = 0.5;    // a decently printed, well-lit colour card lands near here
+  var EXPECTED_CHROMA = 0.5;    // 잘 인쇄된 컬러 카드를 밝은 곳에서 보면 대략 이 값 정도
   wbSaturation = Math.min(1, Math.max(0.12, chroma / EXPECTED_CHROMA));
 }
 
+// 읽어낸 값으로 조명 색과 밝기를 바꿈
 function applyLighting(){
   hemi.color.setRGB(0.91*wbGain.r, 0.937*wbGain.g, 1.0*wbGain.b);
   hemi.intensity = 0.62 * wbExposure;
   key.color.setRGB(wbGain.r, wbGain.g, wbGain.b);
   key.intensity = 0.58 * wbExposure;
   fill.intensity = 0.26 * wbExposure;
-  // the fish, not the real world: this filter sits on the transparent WebGL
-  // canvas layered over the camera <video>, so it desaturates the overlay
-  // without touching what the camera actually sees
+  // 실제 카메라 영상이 아니라 거북이만 흐리게 함.
+  // 카메라 영상 위에 겹친 투명한 3D 캔버스에만 필터를 씌우기 때문
   glc.style.filter = wbSaturation >= 0.97 ? '' : 'saturate(' + Math.round(wbSaturation*100) + '%)';
 }
 
-/* ────────────────────────── 6. CAMERA FROM POSE ───────────────────────────── */
+/* ────────────────────────── 6. 카드 위치로 카메라 맞추기 ───────────────────────────── */
 
 var M = new THREE.Matrix4();
+// 계산한 카드 위치를 3D 카메라에 넣음
 function applyPose(){
   if (!pose) return;
   var r1 = pose.r1, up = pose.n, r2 = pose.r2, t = pose.t;
-  // world->camera in OpenCV axes; world columns are (X, Y=normal, Z)
+  // 세계 좌표를 카메라 기준 좌표로 바꾸는 행렬 (열은 X, 위쪽, Z 순서)
   M.set(
     r1[0], up[0], r2[0], t[0],
     r1[1], up[1], r2[1], t[1],
     r1[2], up[2], r2[2], t[2],
     0, 0, 0, 1
   );
-  // OpenCV (y down, z forward) -> three.js (y up, z back)
+  // 계산에 쓴 좌표 방향(y 아래, z 앞)을 three.js 방향(y 위, z 뒤)으로 바꿈
   var flip = new THREE.Matrix4().makeScale(1, -1, -1);
   M.premultiply(flip);
   camera.matrixWorld.copy(M).invert();
@@ -666,6 +674,7 @@ function applyPose(){
   camera.matrixWorldNeedsUpdate = false;
 }
 
+// 화면 크기에 맞춰 카메라 시야를 조정함
 function fitCamera(){
   var vw = video.videoWidth || 1280, vh = video.videoHeight || 720;
   var sw = window.innerWidth, sh = window.innerHeight;
@@ -676,20 +685,21 @@ function fitCamera(){
   camera.fov = 2 * Math.atan(vh / (2 * fFull)) * 180 / Math.PI;
   camera.aspect = vw / vh;
 
-  // the video is displayed with object-fit:cover, so tell the projection which
-  // sub-rectangle of the sensor is actually on screen
+  // 영상은 화면을 꽉 채우게(object-fit:cover) 잘려서 보이므로,
+  // 3D 화면도 카메라 영상 중 실제로 보이는 부분만 그리도록 알려줌
   var scale = Math.max(sw / vw, sh / vh);
   var cw = sw / scale, ch = sh / scale;
   camera.setViewOffset(vw, vh, (vw - cw) / 2, (vh - ch) / 2, cw, ch);
   camera.updateProjectionMatrix();
 }
 
-/* ─────────────────────────── 7. TAP / SPEECH BUBBLES ──────────────────────── */
+/* ─────────────────────────── 7. 터치 / 말풍선 ──────────────────────── */
 
 var ray = new THREE.Raycaster();
 var ndc = new THREE.Vector2();
 var lastTap = 0, lastTapXY = null;
 
+// 화면을 두 번 빠르게 같은 자리에서 눌렀는지 확인함
 function onTap(x, y){
   var now = performance.now();
   var near = lastTapXY && Math.hypot(x - lastTapXY[0], y - lastTapXY[1]) < 48;
@@ -701,6 +711,7 @@ function onTap(x, y){
   }
 }
 
+// 누른 자리에 거북이가 있으면 말하게 함
 function speakAt(x, y){
   ndc.x = (x / window.innerWidth) * 2 - 1;
   ndc.y = -(y / window.innerHeight) * 2 + 1;
@@ -710,10 +721,11 @@ function speakAt(x, y){
   say(hits[0].object.userData.turtle);
 }
 
+// 거북이 대사를 차례대로 하나 골라 말풍선으로 띄움
 function say(t){
   var lines = (t.userData.spec.say || []).filter(Boolean);
   if (!lines.length) return;
-  if (t.userData.bubbleEl) return;              // already talking
+  if (t.userData.bubbleEl) return;              // 이미 말하는 중이면 무시
   var line = lines[t.userData.said % lines.length];
   t.userData.said++;
 
@@ -726,6 +738,7 @@ function say(t){
 }
 
 var tmpV = new THREE.Vector3();
+// 말풍선을 거북이 머리 위에 따라다니게 하고, 3초 지나면 없앰
 function positionBubbles(){
   for (var i = 0; i < turtles.length; i++){
     var t = turtles[i];
@@ -747,15 +760,15 @@ function positionBubbles(){
   }
 }
 
-/* ───────────────────────────── 8. ANIMATION ───────────────────────────────── */
+/* ───────────────────────────── 8. 움직임 ───────────────────────────────── */
 
 var clock = new THREE.Clock();
 var t = 0, tmpA = new THREE.Vector3(), tmpB = new THREE.Vector3();
 
-/* The loop is the same ellipse either way; only which axis must stay positive
-   changes. On a wall that is depth, out of the plaster; on a table it is
-   height, above the top face. The whole loop is pushed clear rather than each
-   point clamped, or the path flattens itself against the surface. */
+/* 거북이는 항상 타원을 그리며 도는데, 카드가 놓인 방식에 따라
+   '카드에서 떨어져야 하는 방향'만 다르다. 벽이면 벽에서 앞으로,
+   테이블이면 바닥에서 위로 떨어진다. 점마다 잘라내면 길이 납작해지므로
+   경로 전체를 한꺼번에 밀어서 띄운다. */
 function place(sp, time, out){
   var a = time * sp.sp + sp.ph;
   var bob = Math.sin(a * 1.7 + sp.ph) * 1.4;
@@ -768,6 +781,7 @@ function place(sp, time, out){
   return out.set(sp.cx + Math.sin(a) * sp.rx, high, sp.cz + swing);
 }
 
+// 매 프레임 실행: QR 찾기, 카메라 맞추기, 거북이 움직이기, 그리기
 function frame(){
   requestAnimationFrame(frame);
   var dt = Math.min(clock.getDelta(), 0.05);
@@ -777,6 +791,7 @@ function frame(){
   var now = performance.now();
   if (now - lastDetect > 70){ lastDetect = now; detect(); }
 
+  // 1.2초 안에 QR을 읽었으면 '찾은 상태'로 봄. 못 찾으면 거북이를 숨김
   var locked = poseAge < 1.2;
   trackEl.textContent = locked ? 'LOCKED' : 'SEARCHING';
   trackEl.className = 'chip' + (locked ? ' lock' : '');
@@ -787,6 +802,7 @@ function frame(){
 
   for (var i = 0; i < turtles.length; i++){
     var tt = turtles[i], sp = tt.userData.spec;
+    // 지금 위치와 아주 조금 뒤 위치를 구해서, 가는 방향을 바라보게 함
     place(sp, t, tmpA);
     place(sp, t + 0.05, tmpB);
     tt.position.copy(tmpA);
@@ -795,6 +811,7 @@ function frame(){
     tt.rotation.y = Math.atan2(-d.z, d.x);
     tt.rotation.z = Math.atan2(d.y, flat) * 0.6;
 
+    // 몸이 살짝 위아래로 흔들리고, 지느러미를 젓는 움직임
     var tb = t * 1.65 + sp.ph * 2;
     tt.userData.bob.position.y = Math.sin(tb * 0.8) * 0.30;
     tt.userData.bob.rotation.z = Math.sin(tb * 0.6 + 1.2) * 0.05;
@@ -806,11 +823,13 @@ function frame(){
     }
 
     tt.updateMatrixWorld();
+    // 그림자는 거북이 바로 아래로, 높이 뜰수록 연해지게 함
     var sh = tt.userData.shadow;
     if (sh){
       sh.position.x = tt.position.x; sh.position.z = tt.position.z;
       sh.material.opacity = Math.max(0.15, 1 - tt.position.y / 40);
     }
+    // 터치용 상자도 거북이를 따라 움직임
     var hit = tt.userData.hit;
     hit.position.copy(tt.position);
     hit.rotation.y = tt.rotation.y;
@@ -820,8 +839,9 @@ function frame(){
   renderer.render(scene, camera);
 }
 
-/* ─────────────────────────────── 9. BOOT ──────────────────────────────────── */
+/* ─────────────────────────────── 9. 시작 ──────────────────────────────────── */
 
+// 카메라를 못 쓸 때 시작 화면에 안내 문구를 보여줌
 function fail(msg, fine){
   gate.classList.remove('hidden');
   document.getElementById('gatemsg').textContent = msg;
@@ -829,6 +849,7 @@ function fail(msg, fine){
   if (fine) document.getElementById('gatefine').textContent = fine;
 }
 
+// 시작 버튼을 누르면 카메라를 켜고 화면 전환
 document.getElementById('go').addEventListener('click', function(){
   if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia){
     fail('This browser will not hand over the camera. Open the link in Safari or Chrome.',
@@ -846,7 +867,7 @@ document.getElementById('go').addEventListener('click', function(){
     hud.classList.remove('hidden');
     tip.classList.remove('hidden');
     fitCamera();
-    setTimeout(function(){ tip.classList.add('hidden'); }, 6000);
+    setTimeout(function(){ tip.classList.add('hidden'); }, 6000);   // 안내 문구는 6초 뒤 사라짐
   }).catch(function(err){
     fail('Camera was refused (' + (err && err.name ? err.name : 'error') + '). ' +
          'Check the site permission and that the page is on https.',
@@ -854,6 +875,7 @@ document.getElementById('go').addEventListener('click', function(){
   });
 });
 
+// 화면을 누르면 터치 확인
 ['pointerdown'].forEach(function(ev){
   document.getElementById('stage').addEventListener(ev, function(e){
     onTap(e.clientX, e.clientY);
@@ -862,6 +884,7 @@ document.getElementById('go').addEventListener('click', function(){
 window.addEventListener('resize', fitCamera);
 video.addEventListener('loadedmetadata', fitCamera);
 
+// 장면을 불러온 다음 만들고 움직이기 시작
 loadScene().then(function(cfg){
   buildScene(cfg);
   fitCamera();
